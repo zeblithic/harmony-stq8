@@ -154,8 +154,7 @@ impl FrameProcessor {
 
         // Power spectrum: |X[k]|^2, only first FFT_SIZE/2 + 1 bins
         let num_bins = FFT_SIZE / 2 + 1;
-        let power_spectrum: Vec<f32> =
-            fft_input[..num_bins].iter().map(|c| c.norm_sqr()).collect();
+        let power_spectrum: Vec<f32> = fft_input[..num_bins].iter().map(|c| c.norm_sqr()).collect();
 
         // Apply filterbank and log compression
         let mel_energies: Vec<f32> = self
