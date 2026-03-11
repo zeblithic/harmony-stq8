@@ -6,7 +6,7 @@
 //! classification decisions and Q8-encoded bytes for auto-accepted syllables.
 
 use crate::classifier::{Classification, Classifier, NearestCentroid};
-use crate::mfcc;
+use crate::mfcc::{self, FrameProcessor};
 use crate::profile::{Decision, Thresholds, UserProfile};
 use crate::q8::Syllable;
 use crate::segmenter::{self, SegmenterConfig};
@@ -37,6 +37,11 @@ pub struct Pipeline {
     profile: UserProfile,
     segmenter_config: SegmenterConfig,
     calibration_samples: Vec<(Syllable, Vec<f32>)>,
+    frame_processor: FrameProcessor,
+    /// Syllable carried over from a previous `process()` call when an odd
+    /// number of syllables were accepted. Prepended to the next call's
+    /// accepted syllables so the pair completes a byte.
+    carry_syllable: Option<Syllable>,
 }
 
 impl Pipeline {
@@ -53,6 +58,8 @@ impl Pipeline {
             },
             segmenter_config: SegmenterConfig::default(),
             calibration_samples: Vec::new(),
+            frame_processor: FrameProcessor::new(),
+            carry_syllable: None,
         }
     }
 
@@ -96,7 +103,7 @@ impl Pipeline {
     /// 4. Apply profile remap (phoneme-level component remapping)
     /// 5. Apply threshold decision
     /// 6. Encode auto-accepted syllables into Q8 bytes (2 syllables = 1 byte)
-    pub fn process(&self, pcm: &[f32]) -> UtteranceResult {
+    pub fn process(&mut self, pcm: &[f32]) -> UtteranceResult {
         if !self.is_calibrated() {
             return UtteranceResult {
                 syllables: Vec::new(),
@@ -111,11 +118,16 @@ impl Pipeline {
         let mut syllable_results = Vec::new();
         let mut accepted_syllables: Vec<Syllable> = Vec::new();
 
+        // Prepend carried-over syllable from the previous call
+        if let Some(carry) = self.carry_syllable.take() {
+            accepted_syllables.push(carry);
+        }
+
         for bound in &bounds {
             let segment_pcm = &pcm[bound.start..bound.end];
 
-            // Step 2: Extract features
-            let features = mfcc::extract_features(segment_pcm);
+            // Step 2: Extract features (reuse cached FrameProcessor)
+            let features = mfcc::extract_features_with(segment_pcm, &self.frame_processor);
 
             // Step 3: Classify
             let classification = match self.classifier.classify(&features) {
@@ -147,7 +159,9 @@ impl Pipeline {
         // Each syllable is one nibble. Two syllables = one byte.
         let q8_bytes = encode_syllables_to_q8(&accepted_syllables);
         let pending_syllable = if accepted_syllables.len() % 2 == 1 {
-            accepted_syllables.last().copied()
+            let trailing = *accepted_syllables.last().unwrap();
+            self.carry_syllable = Some(trailing);
+            Some(trailing)
         } else {
             None
         };
@@ -166,10 +180,19 @@ impl Pipeline {
 
     /// Import a user profile from JSON, replacing the current profile and
     /// re-training the classifier from the imported centroids.
+    ///
+    /// Rejects profiles with an unsupported version number.
     pub fn import_profile_json(&mut self, json: &str) -> Result<(), serde_json::Error> {
         let profile: UserProfile = serde_json::from_str(json)?;
+        if profile.version != 1 {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported profile version {}",
+                profile.version
+            )));
+        }
         self.classifier.train(&profile.centroids);
         self.calibration_samples.clear();
+        self.carry_syllable = None;
         self.profile = profile;
         Ok(())
     }
@@ -226,7 +249,7 @@ mod tests {
 
     #[test]
     fn pipeline_uncalibrated_returns_empty() {
-        let pipeline = Pipeline::new();
+        let mut pipeline = Pipeline::new();
         assert!(!pipeline.is_calibrated());
 
         let pcm = sine_wave(440.0, SAMPLE_RATE as usize);
@@ -494,6 +517,19 @@ mod tests {
             pending,
             Some(Syllable::new(Consonant::V, Vowel::I)),
             "trailing syllable should be reported as pending"
+        );
+    }
+
+    #[test]
+    fn import_rejects_unsupported_version() {
+        let mut pipeline = Pipeline::new();
+        let json = r#"{"version":99,"centroids":[],"thresholds":{"auto_accept":0.85,"reject":0.40},"custom_map":[],"created_epoch_secs":0}"#;
+        let result = pipeline.import_profile_json(json);
+        assert!(result.is_err(), "version 99 should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported profile version"),
+            "error should mention version: {err}"
         );
     }
 }

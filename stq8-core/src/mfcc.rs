@@ -114,14 +114,23 @@ pub fn mel_filterbank(num_filters: usize, fft_size: usize, sample_rate: u32) -> 
 
 /// Cached resources for MFCC extraction, avoiding per-frame recomputation
 /// of FFT plan, mel filterbank, and Hamming window.
-struct FrameProcessor {
+///
+/// Create once and reuse across calls to [`extract_features_with`] to avoid
+/// rebuilding the FFT plan and filterbank on every invocation.
+pub struct FrameProcessor {
     fft: Arc<dyn Fft<f32>>,
     filters: Vec<Vec<f32>>,
     window: Vec<f32>,
 }
 
+impl Default for FrameProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrameProcessor {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(FFT_SIZE);
         let filters = mel_filterbank(NUM_MEL_FILTERS, FFT_SIZE, SAMPLE_RATE);
@@ -204,13 +213,22 @@ pub fn extract_frame_mfccs(frame: &[f32]) -> Vec<f32> {
 
 /// Extract a 52-dimensional feature vector from a syllable audio signal.
 ///
+/// Creates a fresh [`FrameProcessor`] internally. For repeated calls (e.g.,
+/// inside a pipeline), prefer [`extract_features_with`] to reuse the FFT plan.
+pub fn extract_features(signal: &[f32]) -> Vec<f32> {
+    let processor = FrameProcessor::new();
+    extract_features_with(signal, &processor)
+}
+
+/// Extract a 52-dimensional feature vector, reusing a cached [`FrameProcessor`].
+///
 /// Splits the signal into overlapping frames, extracts MFCCs per frame,
 /// computes delta coefficients, then summarizes with mean and variance
 /// of both static and delta MFCCs.
 ///
 /// Output: 52 floats = 13 static means + 13 static variances
 ///                    + 13 delta means + 13 delta variances
-pub fn extract_features(signal: &[f32]) -> Vec<f32> {
+pub fn extract_features_with(signal: &[f32], processor: &FrameProcessor) -> Vec<f32> {
     // Ensure we have at least one frame's worth of signal
     let padded: Vec<f32> = if signal.len() < FRAME_LEN {
         let mut p = signal.to_vec();
@@ -219,9 +237,6 @@ pub fn extract_features(signal: &[f32]) -> Vec<f32> {
     } else {
         signal.to_vec()
     };
-
-    // Cache FFT plan, filterbank, and window across frames
-    let processor = FrameProcessor::new();
 
     // Split into overlapping frames
     let mut frames_mfccs: Vec<Vec<f32>> = Vec::new();

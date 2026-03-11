@@ -52,7 +52,7 @@ impl WasmPipeline {
 
     /// Process a PTT utterance. Returns JSON-encoded UtteranceResult,
     /// or a JSON error object if serialization fails.
-    pub fn process(&self, pcm: &[f32]) -> String {
+    pub fn process(&mut self, pcm: &[f32]) -> String {
         let result = self.inner.process(pcm);
         serde_json::to_string(&result)
             .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
