@@ -53,6 +53,15 @@ impl NearestCentroid {
     pub fn centroids(&self) -> &[(Syllable, Vec<f32>)] {
         &self.centroids
     }
+
+    /// Load pre-computed centroids directly, bypassing the `train` averaging step.
+    ///
+    /// Use this when importing a serialized profile where centroids are already
+    /// final mean vectors. Unlike `train`, this preserves the input exactly —
+    /// duplicate syllable entries are not merged.
+    pub fn load_centroids(&mut self, centroids: Vec<(Syllable, Vec<f32>)>) {
+        self.centroids = centroids;
+    }
 }
 
 impl Default for NearestCentroid {
@@ -340,5 +349,38 @@ mod tests {
         // If ALL centroids are wrong dimension, returns None
         nc.centroids = vec![(s1, vec![1.0f32; 30])];
         assert!(nc.classify(&good).is_none());
+    }
+
+    #[test]
+    fn load_centroids_preserves_duplicates() {
+        let mut nc = NearestCentroid::new();
+        let s1 = Syllable::from_nibble(0);
+
+        // Two entries for the same syllable — load_centroids must not merge them
+        let c1 = vec![1.0f32; FEATURE_DIM];
+        let c2 = vec![0.0f32; FEATURE_DIM];
+        nc.load_centroids(vec![(s1, c1.clone()), (s1, c2.clone())]);
+
+        assert_eq!(nc.centroids().len(), 2, "load_centroids should preserve duplicate entries");
+        assert_eq!(nc.centroids()[0].1, c1);
+        assert_eq!(nc.centroids()[1].1, c2);
+    }
+
+    #[test]
+    fn load_centroids_vs_train_with_duplicates() {
+        let s1 = Syllable::from_nibble(0);
+        let c1 = vec![1.0f32; FEATURE_DIM];
+        let c2 = vec![0.0f32; FEATURE_DIM];
+        let entries = vec![(s1, c1), (s1, c2)];
+
+        // train() merges duplicates into one averaged centroid
+        let mut trained = NearestCentroid::new();
+        trained.train(&entries);
+        assert_eq!(trained.centroids().len(), 1, "train should merge duplicates");
+
+        // load_centroids() preserves them as-is
+        let mut loaded = NearestCentroid::new();
+        loaded.load_centroids(entries);
+        assert_eq!(loaded.centroids().len(), 2, "load_centroids should not merge");
     }
 }

@@ -126,6 +126,7 @@ impl Pipeline {
 
         // Prepend carried-over syllable from the previous call
         let consumed_carry = self.carry_syllable.take();
+        let carry_prepended = consumed_carry.is_some();
         if let Some(carry) = consumed_carry {
             accepted_syllables.push(carry);
         }
@@ -165,10 +166,21 @@ impl Pipeline {
         // Step 6: Encode accepted syllables into Q8 bytes.
         // Each syllable is one nibble. Two syllables = one byte.
         let q8_bytes = encode_syllables_to_q8(&accepted_syllables);
+
+        // Count newly accepted syllables (excluding carried-over prefix)
+        let new_accepted = accepted_syllables.len() - usize::from(carry_prepended);
+
         let pending_syllable = if accepted_syllables.len() % 2 == 1 {
             let trailing = *accepted_syllables.last().unwrap();
             self.carry_syllable = Some(trailing);
-            Some(trailing)
+            // Only surface as pending if new syllables arrived this call.
+            // If the carry just passed through unchanged, don't re-report it —
+            // the caller already knows about it from the previous call.
+            if new_accepted > 0 {
+                Some(trailing)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -209,7 +221,7 @@ impl Pipeline {
                 profile.version
             )));
         }
-        self.classifier.train(&profile.centroids);
+        self.classifier.load_centroids(profile.centroids.clone());
         self.calibration_samples.clear();
         self.carry_syllable = None;
         self.profile = profile;
@@ -576,6 +588,46 @@ mod tests {
         assert!(
             pipeline.carry_syllable.is_none(),
             "recalibration should clear stale carry syllable"
+        );
+    }
+
+    #[test]
+    fn carry_passthrough_does_not_rereport_pending() {
+        let mut pipeline = Pipeline::new();
+
+        // Calibrate with minimal data so process() runs
+        let syllables = all_syllables();
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
+            .iter()
+            .enumerate()
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
+            .collect();
+        pipeline.calibrate(&samples);
+
+        // Set carry AFTER calibration (calibration clears carry)
+        let carry = Syllable::from_nibble(5);
+        pipeline.carry_syllable = Some(carry);
+
+        // Process silence — no new syllables accepted
+        let silence = vec![0.0f32; SAMPLE_RATE as usize];
+        let result = pipeline.process(&silence);
+
+        // The carry should still be held internally
+        assert!(
+            pipeline.carry_syllable.is_some(),
+            "carry should persist internally when nothing new is accepted"
+        );
+
+        // But pending_syllable should NOT re-report the unchanged carry
+        assert!(
+            result.pending_syllable.is_none(),
+            "pending_syllable should be None when carry just passes through unchanged"
+        );
+
+        // consumed_carry should also be None (carry wasn't consumed into a byte)
+        assert!(
+            result.consumed_carry.is_none(),
+            "consumed_carry should be None when no bytes were produced"
         );
     }
 
