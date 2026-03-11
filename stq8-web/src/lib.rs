@@ -40,10 +40,12 @@ impl WasmPipeline {
         self.inner.is_calibrated()
     }
 
-    /// Process a PTT utterance. Returns JSON-encoded UtteranceResult.
+    /// Process a PTT utterance. Returns JSON-encoded UtteranceResult,
+    /// or a JSON error object if serialization fails.
     pub fn process(&self, pcm: &[f32]) -> String {
         let result = self.inner.process(pcm);
-        serde_json::to_string(&result).unwrap_or_default()
+        serde_json::to_string(&result)
+            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
 
     /// Encode bytes to Q8 text.
@@ -51,16 +53,21 @@ impl WasmPipeline {
         q8::encode(data)
     }
 
-    /// Decode Q8 text to bytes. Returns empty vec on error.
-    pub fn decode_q8(text: &str) -> Vec<u8> {
-        q8::decode(text).unwrap_or_default()
+    /// Decode Q8 text to bytes. Returns an error if the text contains
+    /// invalid Q8 words.
+    pub fn decode_q8(text: &str) -> Result<Vec<u8>, JsError> {
+        q8::decode(text).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    pub fn export_profile(&self) -> String {
-        self.inner.export_profile_json().unwrap_or_default()
+    pub fn export_profile(&self) -> Result<String, JsError> {
+        self.inner
+            .export_profile_json()
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    pub fn import_profile(&mut self, json: &str) -> bool {
-        self.inner.import_profile_json(json).is_ok()
+    pub fn import_profile(&mut self, json: &str) -> Result<(), JsError> {
+        self.inner
+            .import_profile_json(json)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 }

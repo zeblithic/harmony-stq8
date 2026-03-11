@@ -60,7 +60,12 @@ impl Pipeline {
 
     /// Train the classifier from all accumulated calibration samples and
     /// store the resulting centroids in the user profile.
+    ///
+    /// No-op if no samples have been added since the last calibration or import.
     pub fn finalize_calibration(&mut self) {
+        if self.calibration_samples.is_empty() {
+            return;
+        }
         self.classifier.train(&self.calibration_samples);
         self.profile.centroids = self.classifier.centroids().to_vec();
         self.calibration_samples.clear();
@@ -319,12 +324,16 @@ mod tests {
 
         // finalize_calibration should be a no-op (no stale samples to re-train on)
         // — it should NOT overwrite the imported profile
-        let centroids_before = pipeline.profile.centroids.len();
         pipeline.finalize_calibration();
-        // After finalizing with no samples, classifier trains on empty set
-        // But since we cleared calibration_samples, this should produce empty centroids
-        // Verify the import was clean by checking centroids_before was correct
-        assert_eq!(centroids_before, syllables.len());
+        assert!(
+            pipeline.is_calibrated(),
+            "finalize_calibration with no pending samples should not destroy imported state"
+        );
+        assert_eq!(
+            pipeline.profile.centroids.len(),
+            syllables.len(),
+            "imported centroids should survive a no-op finalize_calibration"
+        );
     }
 
     #[test]

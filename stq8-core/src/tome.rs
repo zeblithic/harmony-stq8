@@ -71,6 +71,7 @@ pub enum LookupResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TomeError {
     ScrollTooLarge(usize),
+    SerializationFailed,
 }
 
 impl fmt::Display for TomeError {
@@ -82,6 +83,9 @@ impl fmt::Display for TomeError {
                     "scroll too large: {} bytes (max {})",
                     size, MAX_SCROLL_SIZE
                 )
+            }
+            TomeError::SerializationFailed => {
+                write!(f, "scroll serialization failed")
             }
         }
     }
@@ -107,7 +111,8 @@ impl Tome {
     }
 
     pub fn try_insert(&mut self, address: Vec<u8>, scroll: Scroll) -> Result<(), TomeError> {
-        let serialized = serde_json::to_vec(&scroll).expect("scroll serialization should not fail");
+        let serialized =
+            serde_json::to_vec(&scroll).map_err(|_| TomeError::SerializationFailed)?;
         let size = serialized.len();
         if size > MAX_SCROLL_SIZE {
             return Err(TomeError::ScrollTooLarge(size));

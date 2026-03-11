@@ -119,10 +119,12 @@ impl Classifier for NearestCentroid {
         // Compute mean feature vector per syllable
         self.centroids.clear();
         for (syllable, vectors) in groups {
-            let n = vectors.len() as f32;
             let dim = vectors[0].len();
+            // Skip samples with mismatched dimensions
+            let valid: Vec<&&Vec<f32>> = vectors.iter().filter(|v| v.len() == dim).collect();
+            let n = valid.len() as f32;
             let mut mean = vec![0.0_f32; dim];
-            for v in &vectors {
+            for v in &valid {
                 for (i, &val) in v.iter().enumerate() {
                     mean[i] += val;
                 }
