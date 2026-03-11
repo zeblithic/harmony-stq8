@@ -46,12 +46,7 @@ impl Consonant {
 
     /// The character representation.
     pub fn char(self) -> char {
-        match self {
-            Consonant::GlottalStop => '\'',
-            Consonant::J => 'J',
-            Consonant::K => 'K',
-            Consonant::V => 'V',
-        }
+        CONSONANT_CHARS[self.bits() as usize]
     }
 }
 
@@ -92,12 +87,7 @@ impl Vowel {
 
     /// The character representation.
     pub fn char(self) -> char {
-        match self {
-            Vowel::O => 'O',
-            Vowel::U => 'U',
-            Vowel::E => 'E',
-            Vowel::I => 'I',
-        }
+        VOWEL_CHARS[self.bits() as usize]
     }
 }
 
@@ -132,13 +122,13 @@ const VOWEL_CHARS: [char; 4] = ['O', 'U', 'E', 'I'];
 
 /// Convert a nibble (low 4 bits of `nibble`) to a two-character syllable string.
 pub fn nibble_to_syllable(nibble: u8) -> String {
-    let consonant = CONSONANT_CHARS[((nibble >> 2) & 0x3) as usize];
-    let vowel = VOWEL_CHARS[(nibble & 0x3) as usize];
-    format!("{consonant}{vowel}")
+    let consonant = Consonant::from_bits((nibble >> 2) & 0x03);
+    let vowel = Vowel::from_bits(nibble & 0x03);
+    format!("{}{}", consonant.char(), vowel.char())
 }
 
 /// Parse a two-character syllable string back to a nibble value (0..15).
-/// Returns `None` if the string is not a valid syllable.
+/// Matching is case-insensitive. Returns `None` if the string is not a valid syllable.
 pub fn syllable_to_nibble(s: &str) -> Option<u8> {
     let mut chars = s.chars();
     let c = chars.next()?;
