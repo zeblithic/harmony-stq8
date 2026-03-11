@@ -29,6 +29,10 @@ pub struct UtteranceResult {
     /// An accepted syllable that couldn't be paired into a complete byte.
     /// The UI should prompt the user to speak one more syllable.
     pub pending_syllable: Option<Syllable>,
+    /// The carry syllable from the *previous* call that was consumed and
+    /// paired with the first accepted syllable of this call. `None` if
+    /// no carry was consumed.
+    pub consumed_carry: Option<Syllable>,
 }
 
 /// Main processing pipeline: segment -> MFCC -> classify -> decide -> Q8 encode.
@@ -79,6 +83,7 @@ impl Pipeline {
         self.classifier.train(&self.calibration_samples);
         self.profile.centroids = self.classifier.centroids().to_vec();
         self.calibration_samples.clear();
+        self.carry_syllable = None;
     }
 
     /// Convenience: add all samples and finalize calibration in one call.
@@ -109,6 +114,7 @@ impl Pipeline {
                 syllables: Vec::new(),
                 q8_bytes: Vec::new(),
                 pending_syllable: None,
+                consumed_carry: None,
             };
         }
 
@@ -119,7 +125,8 @@ impl Pipeline {
         let mut accepted_syllables: Vec<Syllable> = Vec::new();
 
         // Prepend carried-over syllable from the previous call
-        if let Some(carry) = self.carry_syllable.take() {
+        let consumed_carry = self.carry_syllable.take();
+        if let Some(carry) = consumed_carry {
             accepted_syllables.push(carry);
         }
 
@@ -166,11 +173,23 @@ impl Pipeline {
             None
         };
 
+        // Report consumed_carry only if it contributed to a completed byte.
+        // If the carry just became the new pending syllable, it wasn't "consumed."
+        let consumed_carry = consumed_carry.filter(|_| !q8_bytes.is_empty());
+
         UtteranceResult {
             syllables: syllable_results,
             q8_bytes,
             pending_syllable,
+            consumed_carry,
         }
+    }
+
+    /// Set the profile's creation timestamp. The caller (e.g., JS via WASM)
+    /// is responsible for supplying the current time since `Pipeline` has no
+    /// access to system clocks.
+    pub fn set_created_epoch_secs(&mut self, secs: u64) {
+        self.profile.created_epoch_secs = secs;
     }
 
     /// Export the user profile as JSON.
@@ -473,6 +492,7 @@ mod tests {
     #[test]
     fn utterance_result_serialization() {
         let syllable = Syllable::new(Consonant::V, Vowel::E);
+        let carry = Syllable::new(Consonant::J, Vowel::U);
         let result = UtteranceResult {
             syllables: vec![SyllableResult {
                 decision: Decision::Reject(0.2),
@@ -483,6 +503,7 @@ mod tests {
             }],
             q8_bytes: vec![0x92, 0xFF],
             pending_syllable: Some(Syllable::new(Consonant::K, Vowel::O)),
+            consumed_carry: Some(carry),
         };
 
         let json = serde_json::to_string(&result).expect("serialize UtteranceResult");
@@ -495,6 +516,7 @@ mod tests {
             restored.pending_syllable,
             Some(Syllable::new(Consonant::K, Vowel::O))
         );
+        assert_eq!(restored.consumed_carry, Some(carry));
     }
 
     #[test]
@@ -530,6 +552,42 @@ mod tests {
         assert!(
             err.contains("unsupported profile version"),
             "error should mention version: {err}"
+        );
+    }
+
+    #[test]
+    fn recalibration_clears_carry_syllable() {
+        let mut pipeline = Pipeline::new();
+        let syllables = all_syllables();
+
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
+            .iter()
+            .enumerate()
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
+            .collect();
+
+        pipeline.calibrate(&samples);
+
+        // Manually set a carry syllable (simulating a previous process() with odd accepted)
+        pipeline.carry_syllable = Some(Syllable::from_nibble(5));
+
+        // Recalibrate should clear carry
+        pipeline.calibrate(&samples);
+        assert!(
+            pipeline.carry_syllable.is_none(),
+            "recalibration should clear stale carry syllable"
+        );
+    }
+
+    #[test]
+    fn set_created_epoch_secs() {
+        let mut pipeline = Pipeline::new();
+        pipeline.set_created_epoch_secs(1_710_000_000);
+
+        let json = pipeline.export_profile_json().expect("export");
+        assert!(
+            json.contains("1710000000"),
+            "exported profile should contain the timestamp"
         );
     }
 }

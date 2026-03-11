@@ -82,7 +82,11 @@ pub fn segment(samples: &[f32], config: &SegmenterConfig) -> Vec<SyllableBounds>
         .max(1e-6);
 
     // Step 3: Mark active frames.
-    let threshold = noise_floor * config.onset_threshold;
+    // Use the relative threshold, but enforce an absolute minimum so that
+    // if speech starts immediately (no leading silence), the estimated
+    // noise floor doesn't suppress all detection.
+    let abs_min_threshold = 0.01_f32;
+    let threshold = (noise_floor * config.onset_threshold).max(abs_min_threshold);
     let active: Vec<bool> = rms_values.iter().map(|&rms| rms > threshold).collect();
 
     // Step 4: Find contiguous runs of active frames -> candidate regions.

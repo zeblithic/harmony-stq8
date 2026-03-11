@@ -54,8 +54,10 @@ impl WasmPipeline {
     /// or a JSON error object if serialization fails.
     pub fn process(&mut self, pcm: &[f32]) -> String {
         let result = self.inner.process(pcm);
-        serde_json::to_string(&result)
-            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+        serde_json::to_string(&result).unwrap_or_else(|e| {
+            let escaped = e.to_string().replace('\\', "\\\\").replace('"', "\\\"");
+            format!("{{\"error\":\"{escaped}\"}}")
+        })
     }
 
     /// Encode bytes to Q8 text.
@@ -67,6 +69,13 @@ impl WasmPipeline {
     /// invalid Q8 words.
     pub fn decode_q8(text: &str) -> Result<Vec<u8>, JsError> {
         q8::decode(text).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Set the profile creation timestamp (seconds since Unix epoch).
+    /// Call this before `export_profile` so exported profiles carry a
+    /// meaningful timestamp.
+    pub fn set_created_epoch_secs(&mut self, secs: u64) {
+        self.inner.set_created_epoch_secs(secs);
     }
 
     pub fn export_profile(&self) -> Result<String, JsError> {
