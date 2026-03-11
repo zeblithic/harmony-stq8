@@ -64,6 +64,8 @@ pub struct TransversalClassification {
 /// Errors that can occur during transversal training.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrainError {
+    /// No samples were provided.
+    NoSamples,
     /// phrase_index was not 0 or 1.
     InvalidPhraseIndex(u8),
     /// The syllable does not belong to the specified phrase.
@@ -81,6 +83,9 @@ pub enum TrainError {
 impl std::fmt::Display for TrainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            TrainError::NoSamples => {
+                write!(f, "no calibration samples were provided")
+            }
             TrainError::InvalidPhraseIndex(idx) => {
                 write!(f, "invalid phrase index: {idx} (must be 0 or 1)")
             }
@@ -219,15 +224,37 @@ impl TransversalClassifier {
 
     /// Load pre-computed centroids directly for profile import.
     ///
-    /// Sets `trained = true` if both phrases have exactly 4 centroids.
+    /// Validates that each syllable belongs to its declared phrase and that
+    /// feature vectors have the correct dimension (`FEATURE_DIM`).
+    /// Returns an error description on validation failure.
     pub fn load_centroids(
         &mut self,
         phrase0: Vec<(Syllable, Vec<f32>)>,
         phrase1: Vec<(Syllable, Vec<f32>)>,
-    ) {
+    ) -> Result<(), String> {
+        for (pi, (valid_syllables, centroids)) in
+            [(&PHRASE_1[..], &phrase0), (&PHRASE_2[..], &phrase1)]
+                .iter()
+                .enumerate()
+        {
+            for (syllable, features) in *centroids {
+                if !valid_syllables.contains(syllable) {
+                    return Err(format!(
+                        "syllable {syllable} does not belong to phrase {pi}"
+                    ));
+                }
+                if features.len() != FEATURE_DIM {
+                    return Err(format!(
+                        "centroid for {syllable} in phrase {pi} has {} features, expected {FEATURE_DIM}",
+                        features.len()
+                    ));
+                }
+            }
+        }
         self.phrase_centroids[0] = phrase0;
         self.phrase_centroids[1] = phrase1;
         self.trained = self.phrase_centroids[0].len() == 4 && self.phrase_centroids[1].len() == 4;
+        Ok(())
     }
 
     /// Classify a feature vector using Top-2-per-phrase intersection.
@@ -528,5 +555,56 @@ mod tests {
             }
             other => panic!("expected WrongSyllableForPhrase, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_centroids_rejects_wrong_syllable_membership() {
+        let mut tc = TransversalClassifier::new();
+        // Put PHRASE_2 syllables in phrase0 slot — should fail
+        let phrase0: Vec<(Syllable, Vec<f32>)> = PHRASE_2
+            .iter()
+            .map(|&s| (s, vec![1.0; FEATURE_DIM]))
+            .collect();
+        let phrase1: Vec<(Syllable, Vec<f32>)> = PHRASE_1
+            .iter()
+            .map(|&s| (s, vec![1.0; FEATURE_DIM]))
+            .collect();
+        let result = tc.load_centroids(phrase0, phrase1);
+        assert!(result.is_err(), "swapped phrases should be rejected");
+        assert!(result.unwrap_err().contains("does not belong to phrase"));
+        assert!(!tc.is_trained());
+    }
+
+    #[test]
+    fn load_centroids_rejects_wrong_feature_dimension() {
+        let mut tc = TransversalClassifier::new();
+        let phrase0: Vec<(Syllable, Vec<f32>)> = PHRASE_1
+            .iter()
+            .map(|&s| (s, vec![1.0; 30])) // wrong dimension
+            .collect();
+        let phrase1: Vec<(Syllable, Vec<f32>)> = PHRASE_2
+            .iter()
+            .map(|&s| (s, vec![1.0; FEATURE_DIM]))
+            .collect();
+        let result = tc.load_centroids(phrase0, phrase1);
+        assert!(result.is_err(), "wrong feature dimension should be rejected");
+        assert!(result.unwrap_err().contains("features, expected"));
+        assert!(!tc.is_trained());
+    }
+
+    #[test]
+    fn load_centroids_accepts_valid_data() {
+        let mut tc = TransversalClassifier::new();
+        let phrase0: Vec<(Syllable, Vec<f32>)> = PHRASE_1
+            .iter()
+            .map(|&s| (s, vec![1.0; FEATURE_DIM]))
+            .collect();
+        let phrase1: Vec<(Syllable, Vec<f32>)> = PHRASE_2
+            .iter()
+            .map(|&s| (s, vec![1.0; FEATURE_DIM]))
+            .collect();
+        let result = tc.load_centroids(phrase0, phrase1);
+        assert!(result.is_ok(), "valid data should be accepted");
+        assert!(tc.is_trained());
     }
 }

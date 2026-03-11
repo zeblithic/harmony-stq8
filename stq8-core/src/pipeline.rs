@@ -88,6 +88,10 @@ impl Pipeline {
         }
         self.classifier.train(&self.calibration_samples);
         self.profile.centroids = self.classifier.centroids().to_vec();
+        self.profile.calibration_mode = CalibrationMode::Full;
+        // Reset stale transversal classifier so is_calibrated() and process()
+        // reflect only the active mode.
+        self.transversal_classifier = TransversalClassifier::new();
         self.calibration_samples.clear();
         self.carry_syllable = None;
     }
@@ -110,7 +114,7 @@ impl Pipeline {
     /// that doesn't belong to its phrase, or if a phrase is missing samples.
     pub fn finalize_transversal_calibration(&mut self) -> Result<(), TrainError> {
         if self.transversal_samples.is_empty() {
-            return Ok(());
+            return Err(TrainError::NoSamples);
         }
         self.transversal_classifier
             .train(&self.transversal_samples)?;
@@ -124,6 +128,9 @@ impl Pipeline {
             }
         }
         self.profile.calibration_mode = CalibrationMode::Transversal;
+        // Reset stale full classifier so is_calibrated() and process()
+        // reflect only the active mode.
+        self.classifier = NearestCentroid::new();
         self.transversal_samples.clear();
         self.carry_syllable = None;
         Ok(())
@@ -287,7 +294,9 @@ impl Pipeline {
                     profile.centroids[..4].to_vec(),
                     profile.centroids[4..].to_vec(),
                 );
-                self.transversal_classifier.load_centroids(p0, p1);
+                self.transversal_classifier
+                    .load_centroids(p0, p1)
+                    .map_err(serde::de::Error::custom)?;
                 // Reset stale Full classifier so is_calibrated() reflects only the active mode
                 self.classifier = NearestCentroid::new();
             }
@@ -928,5 +937,114 @@ mod tests {
         );
         let result = pipeline.finalize_transversal_calibration();
         assert!(result.is_err(), "should propagate WrongSyllableForPhrase error");
+    }
+
+    #[test]
+    fn finalize_calibration_sets_full_mode_and_resets_transversal() {
+        use crate::profile::CalibrationMode;
+
+        let mut pipeline = Pipeline::new();
+        let phrase1_indices: [u8; 4] = [0, 5, 10, 15];
+        let phrase2_indices: [u8; 4] = [3, 6, 8, 13];
+
+        // First: transversal calibration
+        for &idx in &phrase1_indices {
+            pipeline.add_transversal_sample(
+                0,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        for &idx in &phrase2_indices {
+            pipeline.add_transversal_sample(
+                1,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        pipeline
+            .finalize_transversal_calibration()
+            .expect("transversal training should succeed");
+        assert_eq!(pipeline.profile.calibration_mode, CalibrationMode::Transversal);
+        assert!(pipeline.transversal_classifier.is_trained());
+
+        // Now: full 16-sound calibration over the top
+        let syllables = all_syllables();
+        for (idx, &syllable) in syllables.iter().enumerate() {
+            pipeline.add_calibration_sample(syllable, make_features(idx));
+        }
+        pipeline.finalize_calibration();
+
+        // Mode must switch to Full
+        assert_eq!(pipeline.profile.calibration_mode, CalibrationMode::Full);
+        assert!(pipeline.classifier.is_trained());
+        // Stale transversal classifier must be reset
+        assert!(
+            !pipeline.transversal_classifier.is_trained(),
+            "finalize_calibration should reset stale transversal classifier"
+        );
+    }
+
+    #[test]
+    fn finalize_transversal_errors_on_empty_samples() {
+        let mut pipeline = Pipeline::new();
+        let result = pipeline.finalize_transversal_calibration();
+        assert!(result.is_err(), "empty samples should return error");
+        let err = result.unwrap_err();
+        assert_eq!(
+            err,
+            crate::transversal::TrainError::NoSamples,
+            "error should be NoSamples variant"
+        );
+    }
+
+    #[test]
+    fn import_rejects_transversal_with_wrong_syllable_membership() {
+        // Build a valid transversal profile, then mangle the syllable labels
+        let mut pipeline = Pipeline::new();
+        let phrase1_indices: [u8; 4] = [0, 5, 10, 15];
+        let phrase2_indices: [u8; 4] = [3, 6, 8, 13];
+
+        for &idx in &phrase1_indices {
+            pipeline.add_transversal_sample(
+                0,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        for &idx in &phrase2_indices {
+            pipeline.add_transversal_sample(
+                1,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        pipeline
+            .finalize_transversal_calibration()
+            .expect("training should succeed");
+
+        // Export, parse, swap phrase 0/1 centroids, re-serialize
+        let json = pipeline.export_profile_json().expect("export");
+        let mut profile: serde_json::Value =
+            serde_json::from_str(&json).expect("parse");
+        let centroids = profile["centroids"].as_array_mut().unwrap();
+        // Swap first 4 and last 4 centroids (phrase 0 ↔ phrase 1)
+        let first_half: Vec<_> = centroids[..4].to_vec();
+        let second_half: Vec<_> = centroids[4..].to_vec();
+        centroids[..4].clone_from_slice(&second_half);
+        centroids[4..].clone_from_slice(&first_half);
+        let mangled_json = serde_json::to_string(&profile).unwrap();
+
+        let mut new_pipeline = Pipeline::new();
+        let result = new_pipeline.import_profile_json(&mangled_json);
+        assert!(
+            result.is_err(),
+            "importing profile with swapped phrase centroids should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not belong to phrase"),
+            "error should mention phrase membership: {err}"
+        );
     }
 }
