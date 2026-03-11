@@ -26,6 +26,9 @@ pub struct UtteranceResult {
     pub syllables: Vec<SyllableResult>,
     /// Q8 bytes emitted only from auto-accepted syllables.
     pub q8_bytes: Vec<u8>,
+    /// An accepted syllable that couldn't be paired into a complete byte.
+    /// The UI should prompt the user to speak one more syllable.
+    pub pending_syllable: Option<Syllable>,
 }
 
 /// Main processing pipeline: segment -> MFCC -> classify -> decide -> Q8 encode.
@@ -98,6 +101,7 @@ impl Pipeline {
             return UtteranceResult {
                 syllables: Vec::new(),
                 q8_bytes: Vec::new(),
+                pending_syllable: None,
             };
         }
 
@@ -142,10 +146,16 @@ impl Pipeline {
         // Step 6: Encode accepted syllables into Q8 bytes.
         // Each syllable is one nibble. Two syllables = one byte.
         let q8_bytes = encode_syllables_to_q8(&accepted_syllables);
+        let pending_syllable = if accepted_syllables.len() % 2 == 1 {
+            accepted_syllables.last().copied()
+        } else {
+            None
+        };
 
         UtteranceResult {
             syllables: syllable_results,
             q8_bytes,
+            pending_syllable,
         }
     }
 
@@ -449,6 +459,7 @@ mod tests {
                 },
             }],
             q8_bytes: vec![0x92, 0xFF],
+            pending_syllable: Some(Syllable::new(Consonant::K, Vowel::O)),
         };
 
         let json = serde_json::to_string(&result).expect("serialize UtteranceResult");
@@ -457,5 +468,32 @@ mod tests {
 
         assert_eq!(restored.syllables.len(), 1);
         assert_eq!(restored.q8_bytes, vec![0x92, 0xFF]);
+        assert_eq!(
+            restored.pending_syllable,
+            Some(Syllable::new(Consonant::K, Vowel::O))
+        );
+    }
+
+    #[test]
+    fn encode_odd_syllables_reports_pending() {
+        let syllables = vec![
+            Syllable::new(Consonant::K, Vowel::U),           // nibble 9
+            Syllable::new(Consonant::GlottalStop, Vowel::E), // nibble 2
+            Syllable::new(Consonant::V, Vowel::I),           // nibble 15 — trailing
+        ];
+
+        let bytes = encode_syllables_to_q8(&syllables);
+        assert_eq!(bytes, vec![0x92], "only complete pairs should encode");
+
+        let pending = if syllables.len() % 2 == 1 {
+            syllables.last().copied()
+        } else {
+            None
+        };
+        assert_eq!(
+            pending,
+            Some(Syllable::new(Consonant::V, Vowel::I)),
+            "trailing syllable should be reported as pending"
+        );
     }
 }

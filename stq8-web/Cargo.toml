@@ -11,7 +11,4 @@ crate-type = ["cdylib"]
 [dependencies]
 stq8-core = { path = "../stq8-core" }
 wasm-bindgen = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde-wasm-bindgen = "0.6"
 serde_json = "1"
-js-sys = "0.3"

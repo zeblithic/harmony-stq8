@@ -83,8 +83,13 @@ impl Classifier for NearestCentroid {
         let mut similarities: Vec<(Syllable, f32)> = self
             .centroids
             .iter()
+            .filter(|(_, centroid)| centroid.len() == FEATURE_DIM)
             .map(|(syllable, centroid)| (*syllable, cosine_similarity(features, centroid)))
             .collect();
+
+        if similarities.is_empty() {
+            return None;
+        }
 
         // Sort descending by similarity
         similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -315,5 +320,25 @@ mod tests {
             "softmax confidence {:.3} should have usable dynamic range",
             result.confidence
         );
+    }
+
+    #[test]
+    fn wrong_centroid_dim_skipped_in_classify() {
+        let mut nc = NearestCentroid::new();
+        let s1 = Syllable::from_nibble(0);
+        let s2 = Syllable::from_nibble(1);
+
+        // Manually build centroids with mismatched dimensions
+        let good = vec![1.0f32; FEATURE_DIM];
+        let bad = vec![1.0f32; 30]; // wrong dimension
+        nc.centroids = vec![(s1, good.clone()), (s2, bad)];
+
+        // Should still classify using only the good centroid
+        let result = nc.classify(&good).expect("should classify with valid centroid");
+        assert_eq!(result.syllable, s1);
+
+        // If ALL centroids are wrong dimension, returns None
+        nc.centroids = vec![(s1, vec![1.0f32; 30])];
+        assert!(nc.classify(&good).is_none());
     }
 }

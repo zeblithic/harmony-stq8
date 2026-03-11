@@ -78,14 +78,23 @@ impl UserProfile {
         let orig_vowel = syllable.vowel;
         let mut consonant = syllable.consonant;
         let mut vowel = syllable.vowel;
+        let mut consonant_remapped = false;
+        let mut vowel_remapped = false;
         for (from, to) in &self.custom_map {
             match (from, to) {
-                (Phoneme::Consonant(f), Phoneme::Consonant(t)) if *f == orig_consonant => {
+                (Phoneme::Consonant(f), Phoneme::Consonant(t))
+                    if *f == orig_consonant && !consonant_remapped =>
+                {
                     consonant = *t;
+                    consonant_remapped = true;
                 }
-                (Phoneme::Vowel(f), Phoneme::Vowel(t)) if *f == orig_vowel => {
+                (Phoneme::Vowel(f), Phoneme::Vowel(t))
+                    if *f == orig_vowel && !vowel_remapped =>
+                {
                     vowel = *t;
+                    vowel_remapped = true;
                 }
+                // Cross-type rules (consonant→vowel, vowel→consonant) are skipped.
                 _ => {}
             }
         }
@@ -238,6 +247,57 @@ mod tests {
             result,
             Syllable::new(Consonant::J, Vowel::O),
             "remap should apply once, not chain through consecutive rules"
+        );
+    }
+
+    #[test]
+    fn custom_map_duplicate_from_uses_first() {
+        // Two rules for the same source: first match wins.
+        let profile = UserProfile {
+            version: 1,
+            centroids: Vec::new(),
+            thresholds: Thresholds::default(),
+            custom_map: vec![
+                (
+                    Phoneme::Consonant(Consonant::GlottalStop),
+                    Phoneme::Consonant(Consonant::J),
+                ),
+                (
+                    Phoneme::Consonant(Consonant::GlottalStop),
+                    Phoneme::Consonant(Consonant::K),
+                ),
+            ],
+            created_epoch_secs: 0,
+        };
+
+        let input = Syllable::new(Consonant::GlottalStop, Vowel::O);
+        let result = profile.apply_remap(input);
+        assert_eq!(
+            result,
+            Syllable::new(Consonant::J, Vowel::O),
+            "duplicate from rules should use the first match, not last-write-wins"
+        );
+    }
+
+    #[test]
+    fn custom_map_cross_type_ignored() {
+        // A consonant→vowel rule should have no effect.
+        let profile = UserProfile {
+            version: 1,
+            centroids: Vec::new(),
+            thresholds: Thresholds::default(),
+            custom_map: vec![(
+                Phoneme::Consonant(Consonant::GlottalStop),
+                Phoneme::Vowel(Vowel::I),
+            )],
+            created_epoch_secs: 0,
+        };
+
+        let input = Syllable::new(Consonant::GlottalStop, Vowel::O);
+        let result = profile.apply_remap(input);
+        assert_eq!(
+            result, input,
+            "cross-type remap rules should be silently skipped"
         );
     }
 }
