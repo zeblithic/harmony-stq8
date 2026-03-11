@@ -101,9 +101,7 @@ impl UserProfile {
                     consonant = *t;
                     consonant_remapped = true;
                 }
-                (Phoneme::Vowel(f), Phoneme::Vowel(t))
-                    if *f == orig_vowel && !vowel_remapped =>
-                {
+                (Phoneme::Vowel(f), Phoneme::Vowel(t)) if *f == orig_vowel && !vowel_remapped => {
                     vowel = *t;
                     vowel_remapped = true;
                 }

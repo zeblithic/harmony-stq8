@@ -6,3 +6,4 @@ pub mod profile;
 pub mod q8;
 pub mod segmenter;
 pub mod tome;
+pub mod transversal;
