@@ -31,7 +31,7 @@ impl Default for Thresholds {
 }
 
 /// What to do with a classification result.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Decision {
     Accept(Phoneme, f32),
     Suggest(Phoneme, f32),

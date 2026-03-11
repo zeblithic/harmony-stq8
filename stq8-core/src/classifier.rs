@@ -6,10 +6,11 @@
 
 use crate::mfcc::FEATURE_DIM;
 use crate::q8::Phoneme;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Result of classifying a single phoneme.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Classification {
     pub phoneme: Phoneme,
     pub confidence: f32,
