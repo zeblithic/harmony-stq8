@@ -218,6 +218,13 @@ impl TransversalClassifier {
             }
         }
 
+        // Sort centroids by nibble value for deterministic ordering.
+        // HashMap iteration order is randomized per-process; without sorting,
+        // export_profile_json would produce different JSON for identical inputs.
+        for phrase in &mut self.phrase_centroids {
+            phrase.sort_by_key(|(s, _)| s.to_nibble());
+        }
+
         self.trained = self.phrase_centroids[0].len() == 4 && self.phrase_centroids[1].len() == 4;
         Ok(())
     }
@@ -286,8 +293,8 @@ impl TransversalClassifier {
             sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         }
 
-        // Ensure we have at least 2 entries per phrase
-        if phrase_sims[0].len() < 2 || phrase_sims[1].len() < 2 {
+        // Ensure we have exactly 4 entries per phrase (needed for confidence margin)
+        if phrase_sims[0].len() < 4 || phrase_sims[1].len() < 4 {
             return None;
         }
 
@@ -590,6 +597,40 @@ mod tests {
         assert!(result.is_err(), "wrong feature dimension should be rejected");
         assert!(result.unwrap_err().contains("features, expected"));
         assert!(!tc.is_trained());
+    }
+
+    #[test]
+    fn train_produces_deterministic_centroid_order() {
+        // Train twice with samples in different insertion order —
+        // centroids must come out in the same nibble-sorted order both times.
+        let mut tc1 = TransversalClassifier::new();
+        let mut tc2 = TransversalClassifier::new();
+
+        let mut samples_forward = Vec::new();
+        for s in &PHRASE_1 {
+            samples_forward.push((0u8, *s, make_syllable_features(s)));
+        }
+        for s in &PHRASE_2 {
+            samples_forward.push((1u8, *s, make_syllable_features(s)));
+        }
+
+        // Reverse the sample order
+        let mut samples_reverse = samples_forward.clone();
+        samples_reverse.reverse();
+
+        tc1.train(&samples_forward).unwrap();
+        tc2.train(&samples_reverse).unwrap();
+
+        for pi in 0..2 {
+            let c1 = tc1.phrase_centroids(pi as u8).unwrap();
+            let c2 = tc2.phrase_centroids(pi as u8).unwrap();
+            let nibbles1: Vec<u8> = c1.iter().map(|(s, _)| s.to_nibble()).collect();
+            let nibbles2: Vec<u8> = c2.iter().map(|(s, _)| s.to_nibble()).collect();
+            assert_eq!(
+                nibbles1, nibbles2,
+                "phrase {pi} centroid order should be deterministic regardless of input order"
+            );
+        }
     }
 
     #[test]
