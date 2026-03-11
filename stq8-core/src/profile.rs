@@ -9,6 +9,17 @@
 use crate::q8::{Phoneme, Syllable};
 use serde::{Deserialize, Serialize};
 
+/// Which calibration strategy was used to train this profile.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationMode {
+    /// 16-sound: all CV pairs calibrated directly
+    #[default]
+    Full,
+    /// 8-sound: two orthogonal transversal phrases, reconstruct via intersection
+    Transversal,
+}
+
 /// Confidence thresholds for the three-tier model.
 ///
 /// The suggest zone is implicitly defined as [reject, auto_accept).
@@ -65,6 +76,8 @@ pub struct UserProfile {
     /// Applied to syllable components: if a consonant or vowel matches
     /// the `from` phoneme, it's replaced with the `to` phoneme.
     pub custom_map: Vec<(Phoneme, Phoneme)>,
+    #[serde(default)]
+    pub calibration_mode: CalibrationMode,
     pub created_epoch_secs: u64,
 }
 
@@ -88,9 +101,7 @@ impl UserProfile {
                     consonant = *t;
                     consonant_remapped = true;
                 }
-                (Phoneme::Vowel(f), Phoneme::Vowel(t))
-                    if *f == orig_vowel && !vowel_remapped =>
-                {
+                (Phoneme::Vowel(f), Phoneme::Vowel(t)) if *f == orig_vowel && !vowel_remapped => {
                     vowel = *t;
                     vowel_remapped = true;
                 }
@@ -127,6 +138,7 @@ mod tests {
                 Phoneme::Consonant(Consonant::GlottalStop),
                 Phoneme::Consonant(Consonant::J),
             )],
+            calibration_mode: CalibrationMode::default(),
             created_epoch_secs: 1_710_000_000,
         }
     }
@@ -238,6 +250,7 @@ mod tests {
                     Phoneme::Consonant(Consonant::K),
                 ),
             ],
+            calibration_mode: CalibrationMode::default(),
             created_epoch_secs: 0,
         };
 
@@ -267,6 +280,7 @@ mod tests {
                     Phoneme::Consonant(Consonant::K),
                 ),
             ],
+            calibration_mode: CalibrationMode::default(),
             created_epoch_secs: 0,
         };
 
@@ -290,6 +304,7 @@ mod tests {
                 Phoneme::Consonant(Consonant::GlottalStop),
                 Phoneme::Vowel(Vowel::I),
             )],
+            calibration_mode: CalibrationMode::default(),
             created_epoch_secs: 0,
         };
 
@@ -298,6 +313,45 @@ mod tests {
         assert_eq!(
             result, input,
             "cross-type remap rules should be silently skipped"
+        );
+    }
+
+    #[test]
+    fn calibration_mode_default_is_full() {
+        assert_eq!(CalibrationMode::default(), CalibrationMode::Full);
+    }
+
+    #[test]
+    fn calibration_mode_serialization_roundtrip() {
+        let mut profile = sample_profile();
+        profile.calibration_mode = CalibrationMode::Transversal;
+
+        let json = serde_json::to_string(&profile).expect("serialize");
+        let restored: UserProfile = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            restored.calibration_mode,
+            CalibrationMode::Transversal,
+            "calibration_mode should survive serialization roundtrip"
+        );
+    }
+
+    #[test]
+    fn calibration_mode_defaults_to_full_when_missing_in_json() {
+        // JSON without the calibration_mode field — should deserialize as Full
+        let json = r#"{
+            "version": 1,
+            "centroids": [],
+            "thresholds": {"auto_accept": 0.85, "reject": 0.40},
+            "custom_map": [],
+            "created_epoch_secs": 0
+        }"#;
+
+        let profile: UserProfile = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            profile.calibration_mode,
+            CalibrationMode::Full,
+            "missing calibration_mode should default to Full for backward compat"
         );
     }
 }

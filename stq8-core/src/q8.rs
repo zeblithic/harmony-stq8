@@ -150,10 +150,15 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-/// Consonant characters in bit-order.
+/// Consonant characters in bit-order (Q8-FLAT phonetic format).
 const CONSONANT_CHARS: [char; 4] = ['\'', 'J', 'K', 'V'];
-/// Vowel characters in bit-order.
+/// Vowel characters in bit-order (Q8-FLAT phonetic format).
 const VOWEL_CHARS: [char; 4] = ['O', 'U', 'E', 'I'];
+
+/// Consonant characters in bit-order (Q8-BOX visual format).
+const BOX_CONSONANT_CHARS: [char; 4] = ['A', '>', '<', 'V'];
+/// Vowel characters in bit-order (Q8-BOX visual format).
+const BOX_VOWEL_CHARS: [char; 4] = ['O', '=', 'X', 'I'];
 
 /// Convert a nibble (low 4 bits of `nibble`) to a two-character syllable string.
 pub fn nibble_to_syllable(nibble: u8) -> String {
@@ -225,6 +230,63 @@ pub fn decode(text: &str) -> Result<Vec<u8>, DecodeError> {
         }
     }
     Ok(bytes)
+}
+
+/// Render bytes as a Q8-BOX split grid: consonant row on top, vowel row on bottom.
+///
+/// For each row of bytes, two lines are produced:
+/// - Line 1 (consonants): For each byte, the high nibble's BOX consonant + low nibble's BOX consonant.
+/// - Line 2 (vowels): Same layout with BOX vowels.
+///
+/// Bytes within a row are separated by spaces. Row pairs are separated by blank lines.
+pub fn format_box(data: &[u8], bytes_per_row: usize) -> String {
+    if data.is_empty() || bytes_per_row == 0 {
+        return String::new();
+    }
+
+    let row_pairs: Vec<String> = data
+        .chunks(bytes_per_row)
+        .map(|row| {
+            let consonant_line: Vec<String> = row
+                .iter()
+                .map(|&b| {
+                    let high_c = BOX_CONSONANT_CHARS[((b >> 6) & 0x03) as usize];
+                    let low_c = BOX_CONSONANT_CHARS[((b >> 2) & 0x03) as usize];
+                    format!("{high_c}{low_c}")
+                })
+                .collect();
+
+            let vowel_line: Vec<String> = row
+                .iter()
+                .map(|&b| {
+                    let high_v = BOX_VOWEL_CHARS[((b >> 4) & 0x03) as usize];
+                    let low_v = BOX_VOWEL_CHARS[(b & 0x03) as usize];
+                    format!("{high_v}{low_v}")
+                })
+                .collect();
+
+            format!("{}\n{}", consonant_line.join(" "), vowel_line.join(" "))
+        })
+        .collect();
+
+    row_pairs.join("\n\n")
+}
+
+/// Render bytes as Q8-FLAT phonetic text with configurable row width.
+///
+/// Each byte becomes a four-character word (two syllables). Words are space-separated,
+/// with a newline every `bytes_per_row` words.
+pub fn format_flat(data: &[u8], bytes_per_row: usize) -> String {
+    if data.is_empty() || bytes_per_row == 0 {
+        return String::new();
+    }
+
+    let words: Vec<String> = data.iter().map(|&b| byte_to_word(b)).collect();
+    let lines: Vec<String> = words
+        .chunks(bytes_per_row)
+        .map(|chunk| chunk.join(" "))
+        .collect();
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -508,5 +570,88 @@ mod tests {
         assert!(encoded.contains('\n'));
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    // --- Task 1: BOX formatting constants ---
+
+    #[test]
+    fn box_consonant_chars_match_bit_order() {
+        assert_eq!(BOX_CONSONANT_CHARS[0], 'A');
+        assert_eq!(BOX_CONSONANT_CHARS[1], '>');
+        assert_eq!(BOX_CONSONANT_CHARS[2], '<');
+        assert_eq!(BOX_CONSONANT_CHARS[3], 'V');
+    }
+
+    #[test]
+    fn box_vowel_chars_match_bit_order() {
+        assert_eq!(BOX_VOWEL_CHARS[0], 'O');
+        assert_eq!(BOX_VOWEL_CHARS[1], '=');
+        assert_eq!(BOX_VOWEL_CHARS[2], 'X');
+        assert_eq!(BOX_VOWEL_CHARS[3], 'I');
+    }
+
+    // --- Task 2: format_box() ---
+
+    #[test]
+    fn format_box_single_byte() {
+        let result = format_box(&[0x00], 1);
+        assert_eq!(result, "AA\nOO");
+    }
+
+    #[test]
+    fn format_box_two_bytes_one_row() {
+        let result = format_box(&[0x92, 0x03], 2);
+        assert_eq!(result, "<A AA\n=X OI");
+    }
+
+    #[test]
+    fn format_box_four_bytes_two_rows() {
+        let result = format_box(&[0x00, 0xFF, 0x92, 0x03], 2);
+        let expected = "AA VV\nOO II\n\n<A AA\n=X OI";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn format_box_empty() {
+        assert_eq!(format_box(&[], 4), "");
+    }
+
+    #[test]
+    fn format_box_zero_bytes_per_row() {
+        assert_eq!(format_box(&[0x00], 0), "");
+    }
+
+    #[test]
+    fn format_box_all_nibbles() {
+        let result = format_box(&[0xFF], 1);
+        assert_eq!(result, "VV\nII");
+    }
+
+    // --- Task 3: format_flat() ---
+
+    #[test]
+    fn format_flat_single_byte() {
+        assert_eq!(format_flat(&[0x92], 1), "KU'E");
+    }
+
+    #[test]
+    fn format_flat_two_bytes() {
+        assert_eq!(format_flat(&[0x92, 0x03], 2), "KU'E 'O'I");
+    }
+
+    #[test]
+    fn format_flat_wraps_at_bytes_per_row() {
+        let result = format_flat(&[0x00, 0xFF, 0x92, 0x03], 2);
+        assert_eq!(result, "'O'O VIVI\nKU'E 'O'I");
+    }
+
+    #[test]
+    fn format_flat_empty() {
+        assert_eq!(format_flat(&[], 4), "");
+    }
+
+    #[test]
+    fn format_flat_zero_bytes_per_row() {
+        assert_eq!(format_flat(&[0x00], 0), "");
     }
 }

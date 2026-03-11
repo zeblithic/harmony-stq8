@@ -73,7 +73,7 @@ impl Default for NearestCentroid {
 /// Compute cosine similarity between two vectors.
 ///
 /// Returns 0.0 if either vector has zero norm.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -343,7 +343,9 @@ mod tests {
         nc.centroids = vec![(s1, good.clone()), (s2, bad)];
 
         // Should still classify using only the good centroid
-        let result = nc.classify(&good).expect("should classify with valid centroid");
+        let result = nc
+            .classify(&good)
+            .expect("should classify with valid centroid");
         assert_eq!(result.syllable, s1);
 
         // If ALL centroids are wrong dimension, returns None
@@ -361,7 +363,11 @@ mod tests {
         let c2 = vec![0.0f32; FEATURE_DIM];
         nc.load_centroids(vec![(s1, c1.clone()), (s1, c2.clone())]);
 
-        assert_eq!(nc.centroids().len(), 2, "load_centroids should preserve duplicate entries");
+        assert_eq!(
+            nc.centroids().len(),
+            2,
+            "load_centroids should preserve duplicate entries"
+        );
         assert_eq!(nc.centroids()[0].1, c1);
         assert_eq!(nc.centroids()[1].1, c2);
     }
@@ -376,11 +382,19 @@ mod tests {
         // train() merges duplicates into one averaged centroid
         let mut trained = NearestCentroid::new();
         trained.train(&entries);
-        assert_eq!(trained.centroids().len(), 1, "train should merge duplicates");
+        assert_eq!(
+            trained.centroids().len(),
+            1,
+            "train should merge duplicates"
+        );
 
         // load_centroids() preserves them as-is
         let mut loaded = NearestCentroid::new();
         loaded.load_centroids(entries);
-        assert_eq!(loaded.centroids().len(), 2, "load_centroids should not merge");
+        assert_eq!(
+            loaded.centroids().len(),
+            2,
+            "load_centroids should not merge"
+        );
     }
 }
