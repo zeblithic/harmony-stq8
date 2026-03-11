@@ -1,4 +1,5 @@
 pub mod classifier;
+pub mod flashcard;
 pub mod mfcc;
 pub mod pipeline;
 pub mod profile;
