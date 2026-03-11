@@ -61,6 +61,37 @@ impl WasmPipeline {
         self.inner.finalize_calibration();
     }
 
+    /// Feed a transversal calibration sample.
+    /// phrase_index: 0 or 1 (phrase 1 = diagonal, phrase 2 = anti-diagonal).
+    /// syllable_index: 0-15 (must be a valid syllable for the given phrase).
+    /// pcm: raw f32 samples at 16kHz.
+    pub fn add_transversal_sample(
+        &mut self,
+        phrase_index: u8,
+        syllable_index: u8,
+        pcm: &[f32],
+    ) -> Result<(), JsError> {
+        if phrase_index > 1 {
+            return Err(JsError::new(&format!(
+                "phrase_index {phrase_index} out of range (0–1)"
+            )));
+        }
+        if syllable_index > 15 {
+            return Err(JsError::new(&format!(
+                "syllable_index {syllable_index} out of range (0–15)"
+            )));
+        }
+        let syllable = Syllable::from_nibble(syllable_index);
+        let features = mfcc::extract_features(pcm);
+        self.inner
+            .add_transversal_sample(phrase_index, syllable, features);
+        Ok(())
+    }
+
+    pub fn finalize_transversal_calibration(&mut self) {
+        self.inner.finalize_transversal_calibration();
+    }
+
     pub fn is_calibrated(&self) -> bool {
         self.inner.is_calibrated()
     }
@@ -106,19 +137,32 @@ impl WasmPipeline {
     }
 
     /// Format bytes as Q8-BOX grid (consonant row / vowel row).
-    pub fn format_box_q8(data: &[u8], bytes_per_row: usize) -> String {
-        q8::format_box(data, bytes_per_row)
+    pub fn format_box_q8(data: &[u8], bytes_per_row: usize) -> Result<String, JsError> {
+        if bytes_per_row == 0 {
+            return Err(JsError::new("bytes_per_row must be > 0"));
+        }
+        Ok(q8::format_box(data, bytes_per_row))
     }
 
     /// Format bytes as Q8-FLAT phonetic text, wrapped at bytes_per_row.
-    pub fn format_flat_q8(data: &[u8], bytes_per_row: usize) -> String {
-        q8::format_flat(data, bytes_per_row)
+    pub fn format_flat_q8(data: &[u8], bytes_per_row: usize) -> Result<String, JsError> {
+        if bytes_per_row == 0 {
+            return Err(JsError::new("bytes_per_row must be > 0"));
+        }
+        Ok(q8::format_flat(data, bytes_per_row))
     }
 
     /// Generate a flashcard challenge. Returns JSON-serialized Challenge.
     /// Level: 0=Novice, 1=Apprentice, 2=Journeyman, 3=Expert, 4=Master.
     pub fn generate_challenge(level: u8, rng_bytes: &[u8]) -> Result<String, JsError> {
         let level = parse_level(level)?;
+        let required = level.total_bytes();
+        if rng_bytes.len() < required {
+            return Err(JsError::new(&format!(
+                "rng_bytes too short: need {} bytes for {:?}, got {}",
+                required, level, rng_bytes.len()
+            )));
+        }
         let challenge = flashcard::generate(level, rng_bytes);
         serde_json::to_string(&challenge).map_err(|e| JsError::new(&e.to_string()))
     }
