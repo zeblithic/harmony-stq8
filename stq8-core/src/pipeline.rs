@@ -7,7 +7,7 @@
 
 use crate::classifier::{Classification, Classifier, NearestCentroid};
 use crate::mfcc::{self, FrameProcessor};
-use crate::profile::{Decision, Thresholds, UserProfile};
+use crate::profile::{CalibrationMode, Decision, Thresholds, UserProfile};
 use crate::q8::Syllable;
 use crate::segmenter::{self, SegmenterConfig};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,7 @@ impl Pipeline {
                 centroids: Vec::new(),
                 thresholds: Thresholds::default(),
                 custom_map: Vec::new(),
+                calibration_mode: CalibrationMode::default(),
                 created_epoch_secs: 0,
             },
             segmenter_config: SegmenterConfig::default(),
