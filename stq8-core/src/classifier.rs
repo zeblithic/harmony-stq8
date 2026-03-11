@@ -48,6 +48,13 @@ impl NearestCentroid {
     }
 }
 
+impl NearestCentroid {
+    /// Access the trained centroids (syllable, mean feature vector) pairs.
+    pub fn centroids(&self) -> &[(Syllable, Vec<f32>)] {
+        &self.centroids
+    }
+}
+
 impl Default for NearestCentroid {
     fn default() -> Self {
         Self::new()

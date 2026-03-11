@@ -100,7 +100,9 @@ impl Tome {
         }
     }
 
-    pub fn insert(&mut self, address: Vec<u8>, scroll: Scroll) {
+    /// Insert without size check. Only for test use.
+    #[cfg(test)]
+    fn insert(&mut self, address: Vec<u8>, scroll: Scroll) {
         self.entries.insert(address, scroll);
     }
 
