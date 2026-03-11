@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["stq8-core", "stq8-web"]
