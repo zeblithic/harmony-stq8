@@ -6,8 +6,9 @@
 //! Pipeline: pre-emphasis -> Hamming window -> FFT -> power spectrum
 //! -> mel filterbank -> log compression -> DCT type-II -> statistics.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::f32::consts::PI;
+use std::sync::Arc;
 
 /// Number of MFCC coefficients per frame.
 pub const NUM_MFCC: usize = 13;
@@ -111,6 +112,81 @@ pub fn mel_filterbank(num_filters: usize, fft_size: usize, sample_rate: u32) -> 
     filterbank
 }
 
+/// Cached resources for MFCC extraction, avoiding per-frame recomputation
+/// of FFT plan, mel filterbank, and Hamming window.
+struct FrameProcessor {
+    fft: Arc<dyn Fft<f32>>,
+    filters: Vec<Vec<f32>>,
+    window: Vec<f32>,
+}
+
+impl FrameProcessor {
+    fn new() -> Self {
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(FFT_SIZE);
+        let filters = mel_filterbank(NUM_MEL_FILTERS, FFT_SIZE, SAMPLE_RATE);
+        let window = hamming_window(FRAME_LEN);
+        Self {
+            fft,
+            filters,
+            window,
+        }
+    }
+
+    fn process_frame(&self, frame: &[f32]) -> Vec<f32> {
+        // Pre-emphasis
+        let emphasized = pre_emphasis(frame, 0.97);
+
+        // Hamming window
+        let windowed: Vec<f32> = emphasized
+            .iter()
+            .zip(self.window.iter())
+            .map(|(s, w)| s * w)
+            .collect();
+
+        // Zero-pad to FFT_SIZE and prepare complex input
+        let mut fft_input: Vec<Complex<f32>> =
+            windowed.iter().map(|&s| Complex::new(s, 0.0)).collect();
+        fft_input.resize(FFT_SIZE, Complex::new(0.0, 0.0));
+
+        // FFT
+        self.fft.process(&mut fft_input);
+
+        // Power spectrum: |X[k]|^2, only first FFT_SIZE/2 + 1 bins
+        let num_bins = FFT_SIZE / 2 + 1;
+        let power_spectrum: Vec<f32> =
+            fft_input[..num_bins].iter().map(|c| c.norm_sqr()).collect();
+
+        // Apply filterbank and log compression
+        let mel_energies: Vec<f32> = self
+            .filters
+            .iter()
+            .map(|filter| {
+                let energy: f32 = filter
+                    .iter()
+                    .zip(power_spectrum.iter())
+                    .map(|(f, p)| f * p)
+                    .sum();
+                energy.max(1e-10).ln()
+            })
+            .collect();
+
+        // DCT type-II: extract first NUM_MFCC coefficients
+        let n = mel_energies.len();
+        let mut mfccs = Vec::with_capacity(NUM_MFCC);
+        for k in 0..NUM_MFCC {
+            let coeff: f32 = mel_energies
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| x * (PI * k as f32 * (2 * i + 1) as f32 / (2 * n) as f32).cos())
+                .sum();
+            mfccs.push(coeff);
+        }
+
+        mfccs
+    }
+}
+
 /// Extract MFCCs from a single audio frame.
 ///
 /// Input: `frame` of `FRAME_LEN` samples.
@@ -119,66 +195,12 @@ pub fn mel_filterbank(num_filters: usize, fft_size: usize, sample_rate: u32) -> 
 /// Pipeline: pre-emphasize (0.97) -> Hamming window -> zero-pad to FFT_SIZE
 /// -> FFT -> power spectrum -> mel filterbank -> log (floor 1e-10)
 /// -> DCT type-II (first 13 coefficients).
+///
+/// For processing multiple frames, prefer `extract_features` which caches
+/// the FFT plan and mel filterbank across frames.
 pub fn extract_frame_mfccs(frame: &[f32]) -> Vec<f32> {
-    // Pre-emphasis
-    let emphasized = pre_emphasis(frame, 0.97);
-
-    // Hamming window
-    let window = hamming_window(emphasized.len());
-    let windowed: Vec<f32> = emphasized
-        .iter()
-        .zip(window.iter())
-        .map(|(s, w)| s * w)
-        .collect();
-
-    // Zero-pad to FFT_SIZE and prepare complex input
-    let mut fft_input: Vec<Complex<f32>> = windowed
-        .iter()
-        .map(|&s| Complex::new(s, 0.0))
-        .collect();
-    fft_input.resize(FFT_SIZE, Complex::new(0.0, 0.0));
-
-    // FFT
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE);
-    fft.process(&mut fft_input);
-
-    // Power spectrum: |X[k]|^2, only first FFT_SIZE/2 + 1 bins
-    let num_bins = FFT_SIZE / 2 + 1;
-    let power_spectrum: Vec<f32> = fft_input[..num_bins]
-        .iter()
-        .map(|c| c.norm_sqr())
-        .collect();
-
-    // Mel filterbank
-    let filters = mel_filterbank(NUM_MEL_FILTERS, FFT_SIZE, SAMPLE_RATE);
-
-    // Apply filterbank and log compression
-    let mel_energies: Vec<f32> = filters
-        .iter()
-        .map(|filter| {
-            let energy: f32 = filter
-                .iter()
-                .zip(power_spectrum.iter())
-                .map(|(f, p)| f * p)
-                .sum();
-            energy.max(1e-10).ln()
-        })
-        .collect();
-
-    // DCT type-II: extract first NUM_MFCC coefficients
-    let n = mel_energies.len();
-    let mut mfccs = Vec::with_capacity(NUM_MFCC);
-    for k in 0..NUM_MFCC {
-        let coeff: f32 = mel_energies
-            .iter()
-            .enumerate()
-            .map(|(i, &x)| x * (PI * k as f32 * (2 * i + 1) as f32 / (2 * n) as f32).cos())
-            .sum();
-        mfccs.push(coeff);
-    }
-
-    mfccs
+    let processor = FrameProcessor::new();
+    processor.process_frame(frame)
 }
 
 /// Extract a 52-dimensional feature vector from a syllable audio signal.
@@ -199,12 +221,15 @@ pub fn extract_features(signal: &[f32]) -> Vec<f32> {
         signal.to_vec()
     };
 
+    // Cache FFT plan, filterbank, and window across frames
+    let processor = FrameProcessor::new();
+
     // Split into overlapping frames
     let mut frames_mfccs: Vec<Vec<f32>> = Vec::new();
     let mut start = 0;
     while start + FRAME_LEN <= padded.len() {
         let frame = &padded[start..start + FRAME_LEN];
-        frames_mfccs.push(extract_frame_mfccs(frame));
+        frames_mfccs.push(processor.process_frame(frame));
         start += HOP_LEN;
     }
 
@@ -403,20 +428,14 @@ mod tests {
         // All weights non-negative
         for (i, filter) in fb.iter().enumerate() {
             for (k, &w) in filter.iter().enumerate() {
-                assert!(
-                    w >= 0.0,
-                    "filter {i} bin {k} has negative weight: {w}"
-                );
+                assert!(w >= 0.0, "filter {i} bin {k} has negative weight: {w}");
             }
         }
 
         // Each filter should have at least some non-zero values
         for (i, filter) in fb.iter().enumerate() {
             let sum: f32 = filter.iter().sum();
-            assert!(
-                sum > 0.0,
-                "filter {i} is all zeros"
-            );
+            assert!(sum > 0.0, "filter {i} is all zeros");
         }
     }
 
@@ -428,10 +447,7 @@ mod tests {
         let mfccs2 = extract_frame_mfccs(&frame);
 
         assert_eq!(mfccs1.len(), NUM_MFCC, "should produce {NUM_MFCC} MFCCs");
-        assert_eq!(
-            mfccs1, mfccs2,
-            "same input should produce identical MFCCs"
-        );
+        assert_eq!(mfccs1, mfccs2, "same input should produce identical MFCCs");
     }
 
     #[test]
