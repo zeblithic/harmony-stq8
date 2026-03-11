@@ -2,6 +2,7 @@ use stq8_core::flashcard;
 use stq8_core::mfcc;
 use stq8_core::pipeline::Pipeline;
 use stq8_core::q8::{self, Syllable};
+use stq8_core::transversal::{PHRASE_1, PHRASE_2};
 use wasm_bindgen::prelude::*;
 
 /// Parse a u8 level index (0–4) into a flashcard Level.
@@ -62,7 +63,7 @@ impl WasmPipeline {
     }
 
     /// Feed a transversal calibration sample.
-    /// phrase_index: 0 or 1 (phrase 1 = diagonal, phrase 2 = anti-diagonal).
+    /// phrase_index: 0 or 1 (0 = diagonal phrase, 1 = anti-diagonal phrase).
     /// syllable_index: 0-15 (must be a valid syllable for the given phrase).
     /// pcm: raw f32 samples at 16kHz.
     pub fn add_transversal_sample(
@@ -82,14 +83,26 @@ impl WasmPipeline {
             )));
         }
         let syllable = Syllable::from_nibble(syllable_index);
+        let phrase = if phrase_index == 0 {
+            &PHRASE_1[..]
+        } else {
+            &PHRASE_2[..]
+        };
+        if !phrase.contains(&syllable) {
+            return Err(JsError::new(&format!(
+                "syllable index {syllable_index} does not belong to phrase {phrase_index}"
+            )));
+        }
         let features = mfcc::extract_features(pcm);
         self.inner
             .add_transversal_sample(phrase_index, syllable, features);
         Ok(())
     }
 
-    pub fn finalize_transversal_calibration(&mut self) {
-        self.inner.finalize_transversal_calibration();
+    pub fn finalize_transversal_calibration(&mut self) -> Result<(), JsError> {
+        self.inner
+            .finalize_transversal_calibration()
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn is_calibrated(&self) -> bool {

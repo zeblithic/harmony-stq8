@@ -10,7 +10,7 @@ use crate::mfcc::{self, FrameProcessor};
 use crate::profile::{CalibrationMode, Decision, Thresholds, UserProfile};
 use crate::q8::Syllable;
 use crate::segmenter::{self, SegmenterConfig};
-use crate::transversal::TransversalClassifier;
+use crate::transversal::{TrainError, TransversalClassifier};
 use serde::{Deserialize, Serialize};
 
 /// Result of processing a single syllable.
@@ -105,26 +105,28 @@ impl Pipeline {
 
     /// Train the transversal classifier from accumulated samples and store
     /// centroids in the user profile with CalibrationMode::Transversal.
-    pub fn finalize_transversal_calibration(&mut self) {
+    ///
+    /// Returns an error if any sample has an invalid phrase index, a syllable
+    /// that doesn't belong to its phrase, or if a phrase is missing samples.
+    pub fn finalize_transversal_calibration(&mut self) -> Result<(), TrainError> {
         if self.transversal_samples.is_empty() {
-            return;
+            return Ok(());
         }
-        // train() returns Result — ignore errors (incomplete training leaves untrained)
-        let _ = self.transversal_classifier.train(&self.transversal_samples);
-        if self.transversal_classifier.is_trained() {
-            // Store centroids in profile tagged by phrase
-            self.profile.centroids.clear();
-            for phrase_idx in 0..2u8 {
-                if let Some(centroids) = self.transversal_classifier.phrase_centroids(phrase_idx) {
-                    for (syllable, centroid) in centroids {
-                        self.profile.centroids.push((*syllable, centroid.clone()));
-                    }
+        self.transversal_classifier
+            .train(&self.transversal_samples)?;
+        // Store centroids in profile tagged by phrase
+        self.profile.centroids.clear();
+        for phrase_idx in 0..2u8 {
+            if let Some(centroids) = self.transversal_classifier.phrase_centroids(phrase_idx) {
+                for (syllable, centroid) in centroids {
+                    self.profile.centroids.push((*syllable, centroid.clone()));
                 }
             }
-            self.profile.calibration_mode = CalibrationMode::Transversal;
         }
+        self.profile.calibration_mode = CalibrationMode::Transversal;
         self.transversal_samples.clear();
         self.carry_syllable = None;
+        Ok(())
     }
 
     /// Convenience: add all samples and finalize calibration in one call.
@@ -275,19 +277,24 @@ impl Pipeline {
         }
         match profile.calibration_mode {
             CalibrationMode::Transversal => {
-                // First 4 centroids = phrase 0, last 4 = phrase 1
-                let (p0, p1) = if profile.centroids.len() == 8 {
-                    (
-                        profile.centroids[..4].to_vec(),
-                        profile.centroids[4..].to_vec(),
-                    )
-                } else {
-                    (Vec::new(), Vec::new())
-                };
+                if profile.centroids.len() != 8 {
+                    return Err(serde::de::Error::custom(format!(
+                        "transversal profile requires exactly 8 centroids, got {}",
+                        profile.centroids.len()
+                    )));
+                }
+                let (p0, p1) = (
+                    profile.centroids[..4].to_vec(),
+                    profile.centroids[4..].to_vec(),
+                );
                 self.transversal_classifier.load_centroids(p0, p1);
+                // Reset stale Full classifier so is_calibrated() reflects only the active mode
+                self.classifier = NearestCentroid::new();
             }
             CalibrationMode::Full => {
                 self.classifier.load_centroids(profile.centroids.clone());
+                // Reset stale Transversal classifier so is_calibrated() reflects only the active mode
+                self.transversal_classifier = TransversalClassifier::new();
             }
         }
         self.calibration_samples.clear();
@@ -716,7 +723,9 @@ mod tests {
         }
 
         assert!(!pipeline.is_calibrated());
-        pipeline.finalize_transversal_calibration();
+        pipeline
+            .finalize_transversal_calibration()
+            .expect("training should succeed");
         assert!(pipeline.is_calibrated());
     }
 
@@ -743,7 +752,9 @@ mod tests {
             );
         }
 
-        pipeline.finalize_transversal_calibration();
+        pipeline
+            .finalize_transversal_calibration()
+            .expect("training should succeed");
         assert_eq!(
             pipeline.profile.calibration_mode,
             CalibrationMode::Transversal
@@ -773,7 +784,9 @@ mod tests {
             );
         }
 
-        pipeline.finalize_transversal_calibration();
+        pipeline
+            .finalize_transversal_calibration()
+            .expect("training should succeed");
 
         let json = pipeline.export_profile_json().expect("export");
 
@@ -796,5 +809,124 @@ mod tests {
             json.contains("1710000000"),
             "exported profile should contain the timestamp"
         );
+    }
+
+    #[test]
+    fn import_resets_stale_full_classifier() {
+        let mut pipeline = Pipeline::new();
+        let syllables = all_syllables();
+
+        // Step 1: Calibrate with Full mode — classifier is now trained
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
+            .iter()
+            .enumerate()
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
+            .collect();
+        pipeline.calibrate(&samples);
+        assert!(pipeline.classifier.is_trained());
+
+        // Step 2: Import a Transversal profile — should reset the Full classifier
+        let phrase1_indices: [u8; 4] = [0, 5, 10, 15];
+        let phrase2_indices: [u8; 4] = [3, 6, 8, 13];
+        let mut transversal_pipeline = Pipeline::new();
+        for &idx in &phrase1_indices {
+            transversal_pipeline.add_transversal_sample(
+                0,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        for &idx in &phrase2_indices {
+            transversal_pipeline.add_transversal_sample(
+                1,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        transversal_pipeline
+            .finalize_transversal_calibration()
+            .expect("training should succeed");
+        let json = transversal_pipeline.export_profile_json().expect("export");
+
+        pipeline.import_profile_json(&json).expect("import");
+        // The stale Full classifier must be reset
+        assert!(
+            !pipeline.classifier.is_trained(),
+            "importing Transversal profile should reset stale Full classifier"
+        );
+        assert!(pipeline.transversal_classifier.is_trained());
+    }
+
+    #[test]
+    fn import_resets_stale_transversal_classifier() {
+        let mut pipeline = Pipeline::new();
+        let syllables = all_syllables();
+
+        // Step 1: Calibrate with Transversal mode
+        let phrase1_indices: [u8; 4] = [0, 5, 10, 15];
+        let phrase2_indices: [u8; 4] = [3, 6, 8, 13];
+        for &idx in &phrase1_indices {
+            pipeline.add_transversal_sample(
+                0,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        for &idx in &phrase2_indices {
+            pipeline.add_transversal_sample(
+                1,
+                Syllable::from_nibble(idx),
+                make_features(idx as usize),
+            );
+        }
+        pipeline
+            .finalize_transversal_calibration()
+            .expect("training should succeed");
+        assert!(pipeline.transversal_classifier.is_trained());
+
+        // Step 2: Import a Full profile — should reset the Transversal classifier
+        let mut full_pipeline = Pipeline::new();
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
+            .iter()
+            .enumerate()
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
+            .collect();
+        full_pipeline.calibrate(&samples);
+        let json = full_pipeline.export_profile_json().expect("export");
+
+        pipeline.import_profile_json(&json).expect("import");
+        assert!(
+            !pipeline.transversal_classifier.is_trained(),
+            "importing Full profile should reset stale Transversal classifier"
+        );
+        assert!(pipeline.classifier.is_trained());
+    }
+
+    #[test]
+    fn import_rejects_transversal_with_wrong_centroid_count() {
+        let mut pipeline = Pipeline::new();
+        // Manually construct a profile JSON with Transversal mode but wrong centroid count
+        let json = r#"{"version":1,"centroids":[[{"consonant":"GlottalStop","vowel":"O"},[1.0]]],"thresholds":{"auto_accept":0.85,"reject":0.40},"custom_map":[],"calibration_mode":"transversal","created_epoch_secs":0}"#;
+        let result = pipeline.import_profile_json(json);
+        assert!(result.is_err(), "should reject Transversal profile with != 8 centroids");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("8 centroids"),
+            "error should mention centroid count: {err}"
+        );
+    }
+
+    #[test]
+    fn finalize_transversal_propagates_wrong_syllable_error() {
+        let mut pipeline = Pipeline::new();
+        // Add a syllable that doesn't belong to phrase 0
+        // PHRASE_2[0] = 'I (nibble 3), which is not in PHRASE_1
+        pipeline.add_transversal_sample(
+            0,
+            Syllable::from_nibble(3), // 'I — belongs to phrase 2, not phrase 1
+            make_features(3),
+        );
+        let result = pipeline.finalize_transversal_calibration();
+        assert!(result.is_err(), "should propagate WrongSyllableForPhrase error");
     }
 }
