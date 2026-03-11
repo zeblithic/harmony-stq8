@@ -15,6 +15,7 @@ pub struct SyllableBounds {
 }
 
 /// Configuration for the segmenter.
+#[derive(Debug, Clone)]
 pub struct SegmenterConfig {
     /// RMS energy threshold relative to noise floor (multiplier).
     pub onset_threshold: f32,
@@ -38,6 +39,11 @@ impl Default for SegmenterConfig {
 }
 
 /// Segment an audio signal into syllable regions based on energy.
+///
+/// Assumes leading silence: the first `noise_floor_frames` frames are used to
+/// estimate the ambient noise level. If the signal is active from the very start,
+/// the noise floor will be high and detection may fail. Trailing samples that
+/// don't fill a complete analysis frame (160 samples) are not analyzed.
 ///
 /// Algorithm:
 /// 1. Compute RMS energy per 160-sample (10ms) frame.
@@ -71,7 +77,7 @@ pub fn segment(samples: &[f32], config: &SegmenterConfig) -> Vec<SyllableBounds>
     let floor_count = config.noise_floor_frames.min(num_frames);
     let noise_floor = rms_values[..floor_count]
         .iter()
-        .cloned()
+        .copied()
         .fold(f32::INFINITY, f32::min)
         .max(1e-6);
 
