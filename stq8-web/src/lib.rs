@@ -26,10 +26,20 @@ impl WasmPipeline {
     /// Feed a calibration sample. syllable_index: 0-15
     /// (maps to Q8 syllables: 0='O, 1='U, ..., 15=VI).
     /// pcm: raw f32 samples at 16kHz.
-    pub fn add_calibration_sample(&mut self, syllable_index: u8, pcm: &[f32]) {
-        let syllable = Syllable::from_nibble(syllable_index.min(15));
+    pub fn add_calibration_sample(
+        &mut self,
+        syllable_index: u8,
+        pcm: &[f32],
+    ) -> Result<(), JsError> {
+        if syllable_index > 15 {
+            return Err(JsError::new(&format!(
+                "syllable_index {syllable_index} out of range (0–15)"
+            )));
+        }
+        let syllable = Syllable::from_nibble(syllable_index);
         let features = mfcc::extract_features(pcm);
         self.inner.add_calibration_sample(syllable, features);
+        Ok(())
     }
 
     pub fn finalize_calibration(&mut self) {

@@ -74,14 +74,16 @@ impl UserProfile {
     /// Looks up the syllable's consonant and vowel in `custom_map`;
     /// replaces matching components. Non-matching components pass through.
     pub fn apply_remap(&self, syllable: Syllable) -> Syllable {
+        let orig_consonant = syllable.consonant;
+        let orig_vowel = syllable.vowel;
         let mut consonant = syllable.consonant;
         let mut vowel = syllable.vowel;
         for (from, to) in &self.custom_map {
             match (from, to) {
-                (Phoneme::Consonant(f), Phoneme::Consonant(t)) if *f == consonant => {
+                (Phoneme::Consonant(f), Phoneme::Consonant(t)) if *f == orig_consonant => {
                     consonant = *t;
                 }
-                (Phoneme::Vowel(f), Phoneme::Vowel(t)) if *f == vowel => {
+                (Phoneme::Vowel(f), Phoneme::Vowel(t)) if *f == orig_vowel => {
                     vowel = *t;
                 }
                 _ => {}
@@ -206,6 +208,36 @@ mod tests {
         assert_eq!(
             result, ku,
             "unmapped syllable should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn custom_map_no_chaining() {
+        // Rules [(GlottalStop→J), (J→K)] should NOT chain:
+        // GlottalStop should map to J, not K.
+        let profile = UserProfile {
+            version: 1,
+            centroids: Vec::new(),
+            thresholds: Thresholds::default(),
+            custom_map: vec![
+                (
+                    Phoneme::Consonant(Consonant::GlottalStop),
+                    Phoneme::Consonant(Consonant::J),
+                ),
+                (
+                    Phoneme::Consonant(Consonant::J),
+                    Phoneme::Consonant(Consonant::K),
+                ),
+            ],
+            created_epoch_secs: 0,
+        };
+
+        let input = Syllable::new(Consonant::GlottalStop, Vowel::O);
+        let result = profile.apply_remap(input);
+        assert_eq!(
+            result,
+            Syllable::new(Consonant::J, Vowel::O),
+            "remap should apply once, not chain through consecutive rules"
         );
     }
 }

@@ -28,6 +28,9 @@ mod hex_btree {
         let string_map: BTreeMap<String, Scroll> = BTreeMap::deserialize(deserializer)?;
         let mut result = BTreeMap::new();
         for (hex_key, value) in string_map {
+            if !hex_key.is_ascii() {
+                return Err(D::Error::custom("non-ASCII hex key"));
+            }
             if hex_key.len() % 2 != 0 {
                 return Err(D::Error::custom("odd-length hex key"));
             }
@@ -304,5 +307,13 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("5000"));
         assert!(msg.contains("4096"));
+    }
+
+    #[test]
+    fn deserialize_rejects_non_ascii_hex_key() {
+        // Non-ASCII UTF-8 in a key would panic on byte-level slicing without the ASCII check
+        let json = r#"{"entries":{"café":{"version":1,"kind":{"Text":"t"},"title":"t","created_epoch_secs":0,"updated_epoch_secs":0}}}"#;
+        let result: Result<Tome, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "non-ASCII hex key should be rejected");
     }
 }
