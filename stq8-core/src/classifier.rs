@@ -1,35 +1,42 @@
-//! Phoneme classifier with nearest-centroid implementation.
+//! Syllable classifier with nearest-centroid implementation.
 //!
 //! Takes a 52-dimensional MFCC feature vector and returns the most likely
-//! [`Phoneme`] with a confidence score. The [`Classifier`] trait abstracts
+//! [`Syllable`] with a confidence score. The [`Classifier`] trait abstracts
 //! the inference backend so we can swap in Coral/GPU backends later.
 
 use crate::mfcc::FEATURE_DIM;
-use crate::q8::Phoneme;
+use crate::q8::Syllable;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Result of classifying a single phoneme.
+/// Softmax temperature for confidence computation.
+///
+/// Tuned for cosine similarity values in the 0.5–1.0 range with 16 classes.
+/// Lower temperature → sharper discrimination. Higher → more uniform.
+const SOFTMAX_TEMPERATURE: f32 = 0.2;
+
+/// Result of classifying a single syllable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Classification {
-    pub phoneme: Phoneme,
+    pub syllable: Syllable,
     pub confidence: f32,
 }
 
 /// Classifier trait — abstracts inference backend.
 pub trait Classifier {
     fn classify(&self, features: &[f32]) -> Option<Classification>;
-    fn train(&mut self, samples: &[(Phoneme, Vec<f32>)]);
+    fn train(&mut self, samples: &[(Syllable, Vec<f32>)]);
     fn is_trained(&self) -> bool;
 }
 
 /// Cosine-similarity nearest-centroid classifier.
 ///
-/// Stores one centroid (mean feature vector) per phoneme. Classification
+/// Stores one centroid (mean feature vector) per syllable. Classification
 /// finds the centroid with highest cosine similarity to the input.
-/// Confidence is based on daylight between the best and second-best match.
+/// Confidence is softmax-normalized: how much probability mass is on the
+/// best class given the similarity distribution.
 pub struct NearestCentroid {
-    centroids: Vec<(Phoneme, Vec<f32>)>,
+    centroids: Vec<(Syllable, Vec<f32>)>,
 }
 
 impl NearestCentroid {
@@ -66,10 +73,10 @@ impl Classifier for NearestCentroid {
             return None;
         }
 
-        let mut similarities: Vec<(Phoneme, f32)> = self
+        let mut similarities: Vec<(Syllable, f32)> = self
             .centroids
             .iter()
-            .map(|(phoneme, centroid)| (*phoneme, cosine_similarity(features, centroid)))
+            .map(|(syllable, centroid)| (*syllable, cosine_similarity(features, centroid)))
             .collect();
 
         // Sort descending by similarity
@@ -79,31 +86,32 @@ impl Classifier for NearestCentroid {
         let confidence = if similarities.len() == 1 {
             1.0
         } else {
-            let second_best = similarities[1].1;
-            // Confidence = 1 - (second_best / best), clamped to [0, 1]
-            if best.1 == 0.0 {
-                0.0
-            } else {
-                (1.0 - second_best / best.1).clamp(0.0, 1.0)
-            }
+            // Softmax confidence: probability mass on the best class.
+            // Subtract max for numerical stability before exp.
+            let max_sim = best.1;
+            let sum_exp: f32 = similarities
+                .iter()
+                .map(|(_, s)| ((s - max_sim) / SOFTMAX_TEMPERATURE).exp())
+                .sum();
+            (1.0 / sum_exp).clamp(0.0, 1.0)
         };
 
         Some(Classification {
-            phoneme: best.0,
+            syllable: best.0,
             confidence,
         })
     }
 
-    fn train(&mut self, samples: &[(Phoneme, Vec<f32>)]) {
-        // Group samples by phoneme
-        let mut groups: HashMap<Phoneme, Vec<&Vec<f32>>> = HashMap::new();
-        for (phoneme, features) in samples {
-            groups.entry(*phoneme).or_default().push(features);
+    fn train(&mut self, samples: &[(Syllable, Vec<f32>)]) {
+        // Group samples by syllable
+        let mut groups: HashMap<Syllable, Vec<&Vec<f32>>> = HashMap::new();
+        for (syllable, features) in samples {
+            groups.entry(*syllable).or_default().push(features);
         }
 
-        // Compute mean feature vector per phoneme
+        // Compute mean feature vector per syllable
         self.centroids.clear();
-        for (phoneme, vectors) in groups {
+        for (syllable, vectors) in groups {
             let n = vectors.len() as f32;
             let dim = vectors[0].len();
             let mut mean = vec![0.0_f32; dim];
@@ -115,7 +123,7 @@ impl Classifier for NearestCentroid {
             for v in &mut mean {
                 *v /= n;
             }
-            self.centroids.push((phoneme, mean));
+            self.centroids.push((syllable, mean));
         }
     }
 
@@ -129,28 +137,19 @@ mod tests {
     use super::*;
     use crate::q8::{Consonant, Vowel};
 
-    fn make_features(phoneme_idx: usize) -> Vec<f32> {
+    fn make_features(syllable_idx: usize) -> Vec<f32> {
         let mut v = vec![0.0f32; FEATURE_DIM];
-        // Each phoneme gets a unique 6-dimensional block within 52 dims,
-        // ensuring zero cosine similarity between different phonemes.
-        let base = (phoneme_idx * 6) % FEATURE_DIM;
+        // Each syllable gets a unique region of the 52-dim space.
+        // With 16 syllables × 3 dims each = 48 dims used, fits in 52.
+        let base = (syllable_idx * 3) % FEATURE_DIM;
         v[base] = 1.0;
         v[(base + 1) % FEATURE_DIM] = 0.5;
         v[(base + 2) % FEATURE_DIM] = 0.8;
         v
     }
 
-    fn all_phonemes() -> Vec<Phoneme> {
-        vec![
-            Phoneme::Consonant(Consonant::GlottalStop),
-            Phoneme::Consonant(Consonant::J),
-            Phoneme::Consonant(Consonant::K),
-            Phoneme::Consonant(Consonant::V),
-            Phoneme::Vowel(Vowel::O),
-            Phoneme::Vowel(Vowel::U),
-            Phoneme::Vowel(Vowel::E),
-            Phoneme::Vowel(Vowel::I),
-        ]
+    fn all_syllables() -> Vec<Syllable> {
+        (0..16).map(Syllable::from_nibble).collect()
     }
 
     #[test]
@@ -164,35 +163,33 @@ mod tests {
     #[test]
     fn trained_classifies_correctly() {
         let mut nc = NearestCentroid::new();
-        let phonemes = all_phonemes();
+        let syllables = all_syllables();
 
-        // 8 phonemes x 5 samples each
-        let mut samples: Vec<(Phoneme, Vec<f32>)> = Vec::new();
-        for (idx, &phoneme) in phonemes.iter().enumerate() {
+        // 16 syllables × 5 samples each
+        let mut samples: Vec<(Syllable, Vec<f32>)> = Vec::new();
+        for (idx, &syllable) in syllables.iter().enumerate() {
             for rep in 0..5 {
                 let mut features = make_features(idx);
-                // Add small noise per repetition so samples aren't identical
                 for (i, v) in features.iter_mut().enumerate() {
                     *v += (rep as f32) * 0.01 * ((i % 3) as f32 - 1.0);
                 }
-                samples.push((phoneme, features));
+                samples.push((syllable, features));
             }
         }
 
         nc.train(&samples);
         assert!(nc.is_trained());
 
-        // Classify each phoneme's centroid-like vector
-        for (idx, &phoneme) in phonemes.iter().enumerate() {
+        for (idx, &syllable) in syllables.iter().enumerate() {
             let features = make_features(idx);
             let result = nc.classify(&features).expect("should classify");
             assert_eq!(
-                result.phoneme, phoneme,
-                "phoneme index {idx} should classify correctly"
+                result.syllable, syllable,
+                "syllable index {idx} ({syllable}) should classify correctly"
             );
             assert!(
                 result.confidence > 0.5,
-                "phoneme index {idx} confidence {:.3} should be > 0.5",
+                "syllable index {idx} confidence {:.3} should be > 0.5",
                 result.confidence
             );
         }
@@ -201,20 +198,19 @@ mod tests {
     #[test]
     fn exact_centroid_high_confidence() {
         let mut nc = NearestCentroid::new();
-        let phonemes = all_phonemes();
+        let syllables = all_syllables();
 
-        let samples: Vec<(Phoneme, Vec<f32>)> = phonemes
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
             .iter()
             .enumerate()
-            .map(|(idx, &phoneme)| (phoneme, make_features(idx)))
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
             .collect();
 
         nc.train(&samples);
 
-        // Classify with exact centroid
         let features = make_features(0);
         let result = nc.classify(&features).expect("should classify");
-        assert_eq!(result.phoneme, phonemes[0]);
+        assert_eq!(result.syllable, syllables[0]);
         assert!(
             result.confidence > 0.8,
             "exact centroid match confidence {:.3} should be > 0.8",
@@ -225,12 +221,12 @@ mod tests {
     #[test]
     fn equidistant_low_confidence() {
         let mut nc = NearestCentroid::new();
-        let phonemes = all_phonemes();
+        let syllables = all_syllables();
 
-        let samples: Vec<(Phoneme, Vec<f32>)> = phonemes
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
             .iter()
             .enumerate()
-            .map(|(idx, &phoneme)| (phoneme, make_features(idx)))
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
             .collect();
 
         nc.train(&samples);
@@ -238,7 +234,6 @@ mod tests {
         // Zero vector is equidistant from all centroids (cosine similarity = 0.0)
         let zero_features = vec![0.0; FEATURE_DIM];
         let result = nc.classify(&zero_features);
-        // Zero vector yields cosine similarity = 0 with everything, so confidence should be low
         if let Some(classification) = result {
             assert!(
                 classification.confidence < 0.5,
@@ -246,49 +241,69 @@ mod tests {
                 classification.confidence
             );
         }
-        // None is also acceptable since all similarities are 0
     }
 
     #[test]
     fn wrong_feature_dim_returns_none() {
         let mut nc = NearestCentroid::new();
-        let phonemes = all_phonemes();
+        let syllables = all_syllables();
 
-        let samples: Vec<(Phoneme, Vec<f32>)> = phonemes
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
             .iter()
             .enumerate()
-            .map(|(idx, &phoneme)| (phoneme, make_features(idx)))
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
             .collect();
 
         nc.train(&samples);
 
-        // Wrong length: too short
-        let short = vec![1.0; FEATURE_DIM - 1];
-        assert!(nc.classify(&short).is_none());
-
-        // Wrong length: too long
-        let long = vec![1.0; FEATURE_DIM + 1];
-        assert!(nc.classify(&long).is_none());
-
-        // Empty
-        let empty: Vec<f32> = Vec::new();
-        assert!(nc.classify(&empty).is_none());
+        assert!(nc.classify(&vec![1.0; FEATURE_DIM - 1]).is_none());
+        assert!(nc.classify(&vec![1.0; FEATURE_DIM + 1]).is_none());
+        assert!(nc.classify(&Vec::<f32>::new()).is_none());
     }
 
     #[test]
     fn single_centroid_full_confidence() {
         let mut nc = NearestCentroid::new();
-        let phoneme = Phoneme::Consonant(Consonant::K);
-        let features = make_features(2);
+        let syllable = Syllable::new(Consonant::K, Vowel::O);
+        let features = make_features(8); // KO = nibble 8
 
-        nc.train(&[(phoneme, features.clone())]);
+        nc.train(&[(syllable, features.clone())]);
         assert!(nc.is_trained());
 
         let result = nc.classify(&features).expect("should classify");
-        assert_eq!(result.phoneme, phoneme);
+        assert_eq!(result.syllable, syllable);
         assert!(
             (result.confidence - 1.0).abs() < f32::EPSILON,
             "single centroid confidence should be exactly 1.0, got {:.6}",
+            result.confidence
+        );
+    }
+
+    #[test]
+    fn softmax_confidence_has_good_dynamic_range() {
+        // With the old formula (1 - second/best), close similarities gave near-zero
+        // confidence. Softmax should give usable values even when similarities cluster.
+        let mut nc = NearestCentroid::new();
+
+        // Train with only 2 syllables that are somewhat similar
+        let s1 = Syllable::from_nibble(0);
+        let s2 = Syllable::from_nibble(1);
+
+        let mut f1 = vec![0.0f32; FEATURE_DIM];
+        f1[0] = 1.0;
+        f1[1] = 0.5;
+        let mut f2 = vec![0.0f32; FEATURE_DIM];
+        f2[0] = 0.8; // somewhat similar to f1
+        f2[2] = 0.6;
+
+        nc.train(&[(s1, f1.clone()), (s2, f2)]);
+
+        let result = nc.classify(&f1).expect("should classify");
+        assert_eq!(result.syllable, s1);
+        // Softmax should give meaningful confidence even with somewhat similar centroids
+        assert!(
+            result.confidence > 0.3,
+            "softmax confidence {:.3} should have usable dynamic range",
             result.confidence
         );
     }

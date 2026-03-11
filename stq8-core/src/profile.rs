@@ -6,16 +6,16 @@
 //!
 //! Profiles serialize to JSON (~2KB) for portability across devices.
 
-use crate::q8::Phoneme;
+use crate::q8::{Phoneme, Syllable};
 use serde::{Deserialize, Serialize};
 
 /// Confidence thresholds for the three-tier model.
+///
+/// The suggest zone is implicitly defined as [reject, auto_accept).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thresholds {
     /// Above this: auto-accept (default 0.85)
     pub auto_accept: f32,
-    /// Above this but below auto_accept: show suggestion (default 0.60)
-    pub suggest: f32,
     /// Below this: reject entirely (default 0.40)
     pub reject: f32,
 }
@@ -24,7 +24,6 @@ impl Default for Thresholds {
     fn default() -> Self {
         Self {
             auto_accept: 0.85,
-            suggest: 0.60,
             reject: 0.40,
         }
     }
@@ -33,8 +32,8 @@ impl Default for Thresholds {
 /// What to do with a classification result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Decision {
-    Accept(Phoneme, f32),
-    Suggest(Phoneme, f32),
+    Accept(Syllable, f32),
+    Suggest(Syllable, f32),
     Reject(f32),
 }
 
@@ -44,11 +43,11 @@ impl Thresholds {
     /// - confidence >= auto_accept -> Accept
     /// - confidence >= reject -> Suggest (show "did you mean?")
     /// - confidence < reject -> Reject (too ambiguous, no suggestion)
-    pub fn decide(&self, phoneme: Phoneme, confidence: f32) -> Decision {
+    pub fn decide(&self, syllable: Syllable, confidence: f32) -> Decision {
         if confidence >= self.auto_accept {
-            Decision::Accept(phoneme, confidence)
+            Decision::Accept(syllable, confidence)
         } else if confidence >= self.reject {
-            Decision::Suggest(phoneme, confidence)
+            Decision::Suggest(syllable, confidence)
         } else {
             Decision::Reject(confidence)
         }
@@ -59,24 +58,36 @@ impl Thresholds {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfile {
     pub version: u8,
-    pub centroids: Vec<(Phoneme, Vec<f32>)>,
+    pub centroids: Vec<(Syllable, Vec<f32>)>,
     pub thresholds: Thresholds,
+    /// Phoneme-level remapping for accessibility.
+    ///
+    /// Applied to syllable components: if a consonant or vowel matches
+    /// the `from` phoneme, it's replaced with the `to` phoneme.
     pub custom_map: Vec<(Phoneme, Phoneme)>,
     pub created_epoch_secs: u64,
 }
 
 impl UserProfile {
-    /// Apply the custom phoneme remapping.
+    /// Apply the custom phoneme remapping to a syllable's components.
     ///
-    /// Looks up `phoneme` in `custom_map`; returns the mapped value if found,
-    /// otherwise returns the input unchanged.
-    pub fn apply_remap(&self, phoneme: Phoneme) -> Phoneme {
+    /// Looks up the syllable's consonant and vowel in `custom_map`;
+    /// replaces matching components. Non-matching components pass through.
+    pub fn apply_remap(&self, syllable: Syllable) -> Syllable {
+        let mut consonant = syllable.consonant;
+        let mut vowel = syllable.vowel;
         for (from, to) in &self.custom_map {
-            if *from == phoneme {
-                return *to;
+            match (from, to) {
+                (Phoneme::Consonant(f), Phoneme::Consonant(t)) if *f == consonant => {
+                    consonant = *t;
+                }
+                (Phoneme::Vowel(f), Phoneme::Vowel(t)) if *f == vowel => {
+                    vowel = *t;
+                }
+                _ => {}
             }
         }
-        phoneme
+        Syllable::new(consonant, vowel)
     }
 }
 
@@ -88,19 +99,23 @@ mod tests {
 
     /// Helper: build a minimal UserProfile for testing.
     fn sample_profile() -> UserProfile {
-        let glottal = Phoneme::Consonant(Consonant::GlottalStop);
-        let j = Phoneme::Consonant(Consonant::J);
-        let k = Phoneme::Consonant(Consonant::K);
+        let glottal_o = Syllable::new(Consonant::GlottalStop, Vowel::O);
+        let jo = Syllable::new(Consonant::J, Vowel::O);
+        let ku = Syllable::new(Consonant::K, Vowel::U);
 
         UserProfile {
             version: 1,
             centroids: vec![
-                (glottal, vec![0.0; FEATURE_DIM]),
-                (j, vec![1.0; FEATURE_DIM]),
-                (k, vec![0.5; FEATURE_DIM]),
+                (glottal_o, vec![0.0; FEATURE_DIM]),
+                (jo, vec![1.0; FEATURE_DIM]),
+                (ku, vec![0.5; FEATURE_DIM]),
             ],
             thresholds: Thresholds::default(),
-            custom_map: vec![(glottal, j)],
+            // Remap glottal stop consonant → J consonant
+            custom_map: vec![(
+                Phoneme::Consonant(Consonant::GlottalStop),
+                Phoneme::Consonant(Consonant::J),
+            )],
             created_epoch_secs: 1_710_000_000,
         }
     }
@@ -120,7 +135,6 @@ mod tests {
         assert!(
             (restored.thresholds.auto_accept - profile.thresholds.auto_accept).abs() < f32::EPSILON
         );
-        assert!((restored.thresholds.suggest - profile.thresholds.suggest).abs() < f32::EPSILON);
         assert!((restored.thresholds.reject - profile.thresholds.reject).abs() < f32::EPSILON);
         assert_eq!(restored.custom_map, profile.custom_map);
         assert_eq!(restored.created_epoch_secs, profile.created_epoch_secs);
@@ -130,53 +144,68 @@ mod tests {
     fn default_thresholds() {
         let t = Thresholds::default();
         assert!((t.auto_accept - 0.85).abs() < f32::EPSILON);
-        assert!((t.suggest - 0.60).abs() < f32::EPSILON);
         assert!((t.reject - 0.40).abs() < f32::EPSILON);
     }
 
     #[test]
     fn decide_auto_accept() {
         let t = Thresholds::default();
-        let phoneme = Phoneme::Vowel(Vowel::O);
-        let decision = t.decide(phoneme, 0.92);
-        assert_eq!(decision, Decision::Accept(phoneme, 0.92));
+        let syllable = Syllable::new(Consonant::K, Vowel::O);
+        let decision = t.decide(syllable, 0.92);
+        assert_eq!(decision, Decision::Accept(syllable, 0.92));
     }
 
     #[test]
     fn decide_suggest() {
         let t = Thresholds::default();
-        let phoneme = Phoneme::Consonant(Consonant::K);
-        let decision = t.decide(phoneme, 0.72);
-        assert_eq!(decision, Decision::Suggest(phoneme, 0.72));
+        let syllable = Syllable::new(Consonant::K, Vowel::U);
+        let decision = t.decide(syllable, 0.72);
+        assert_eq!(decision, Decision::Suggest(syllable, 0.72));
     }
 
     #[test]
     fn decide_reject() {
         let t = Thresholds::default();
-        let phoneme = Phoneme::Consonant(Consonant::V);
-        let decision = t.decide(phoneme, 0.30);
+        let syllable = Syllable::new(Consonant::V, Vowel::E);
+        let decision = t.decide(syllable, 0.30);
         assert_eq!(decision, Decision::Reject(0.30));
     }
 
     #[test]
-    fn custom_map_applies() {
+    fn custom_map_remaps_consonant() {
         let profile = sample_profile();
-        let glottal = Phoneme::Consonant(Consonant::GlottalStop);
-        let j = Phoneme::Consonant(Consonant::J);
+        // GlottalStop consonant should be remapped to J
+        let glottal_o = Syllable::new(Consonant::GlottalStop, Vowel::O);
+        let j_o = Syllable::new(Consonant::J, Vowel::O);
 
-        let result = profile.apply_remap(glottal);
-        assert_eq!(result, j, "GlottalStop should remap to J");
+        let result = profile.apply_remap(glottal_o);
+        assert_eq!(result, j_o, "GlottalStop consonant should remap to J");
+    }
+
+    #[test]
+    fn custom_map_preserves_vowel() {
+        let profile = sample_profile();
+        // The vowel should pass through since only the consonant is remapped
+        let glottal_i = Syllable::new(Consonant::GlottalStop, Vowel::I);
+        let j_i = Syllable::new(Consonant::J, Vowel::I);
+
+        let result = profile.apply_remap(glottal_i);
+        assert_eq!(
+            result, j_i,
+            "consonant remap should apply regardless of vowel"
+        );
     }
 
     #[test]
     fn custom_map_passthrough() {
         let profile = sample_profile();
-        let vowel_e = Phoneme::Vowel(Vowel::E);
+        // KU has no remap rule — should pass through unchanged
+        let ku = Syllable::new(Consonant::K, Vowel::U);
 
-        let result = profile.apply_remap(vowel_e);
+        let result = profile.apply_remap(ku);
         assert_eq!(
-            result, vowel_e,
-            "unmapped phoneme should pass through unchanged"
+            result, ku,
+            "unmapped syllable should pass through unchanged"
         );
     }
 }

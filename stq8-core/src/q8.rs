@@ -98,6 +98,41 @@ pub enum Phoneme {
     Vowel(Vowel),
 }
 
+/// A consonant-vowel syllable pair — the fundamental classification unit.
+///
+/// Maps directly to a Q8 nibble (4 bits): consonant = high 2 bits, vowel = low 2 bits.
+/// There are exactly 16 syllables (4 consonants × 4 vowels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Syllable {
+    pub consonant: Consonant,
+    pub vowel: Vowel,
+}
+
+impl Syllable {
+    pub fn new(consonant: Consonant, vowel: Vowel) -> Self {
+        Self { consonant, vowel }
+    }
+
+    /// Construct from a nibble value (0–15). Only the low 4 bits are used.
+    pub fn from_nibble(nibble: u8) -> Self {
+        Self {
+            consonant: Consonant::from_bits((nibble >> 2) & 0x03),
+            vowel: Vowel::from_bits(nibble & 0x03),
+        }
+    }
+
+    /// Convert to a nibble value (0–15).
+    pub fn to_nibble(self) -> u8 {
+        (self.consonant.bits() << 2) | self.vowel.bits()
+    }
+}
+
+impl fmt::Display for Syllable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.consonant.char(), self.vowel.char())
+    }
+}
+
 /// Errors that can occur during Q8 decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
@@ -267,6 +302,37 @@ mod tests {
         set.insert(Phoneme::Consonant(Consonant::J));
         set.insert(Phoneme::Vowel(Vowel::O));
         assert_eq!(set.len(), 2);
+    }
+
+    // --- Syllable ---
+
+    #[test]
+    fn syllable_nibble_roundtrip_all_16() {
+        for nibble in 0..16u8 {
+            let syl = Syllable::from_nibble(nibble);
+            assert_eq!(syl.to_nibble(), nibble, "nibble {nibble}: roundtrip failed");
+        }
+    }
+
+    #[test]
+    fn syllable_display() {
+        let syl = Syllable::new(Consonant::K, Vowel::U);
+        assert_eq!(format!("{syl}"), "KU");
+
+        let syl2 = Syllable::new(Consonant::GlottalStop, Vowel::I);
+        assert_eq!(format!("{syl2}"), "'I");
+    }
+
+    #[test]
+    fn syllable_matches_nibble_to_syllable_string() {
+        for nibble in 0..16u8 {
+            let syl = Syllable::from_nibble(nibble);
+            assert_eq!(
+                format!("{syl}"),
+                nibble_to_syllable(nibble),
+                "nibble {nibble}: Syllable display should match nibble_to_syllable"
+            );
+        }
     }
 
     // --- nibble_to_syllable ---

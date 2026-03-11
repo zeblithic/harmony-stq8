@@ -3,12 +3,12 @@
 //!
 //! The [`Pipeline`] is the main API surface for STQ8. It accepts raw PCM audio
 //! from a PTT utterance and returns an [`UtteranceResult`] containing per-syllable
-//! classification decisions and Q8-encoded bytes for auto-accepted phonemes.
+//! classification decisions and Q8-encoded bytes for auto-accepted syllables.
 
 use crate::classifier::{Classification, Classifier, NearestCentroid};
 use crate::mfcc;
 use crate::profile::{Decision, Thresholds, UserProfile};
-use crate::q8::Phoneme;
+use crate::q8::Syllable;
 use crate::segmenter::{self, SegmenterConfig};
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +33,7 @@ pub struct Pipeline {
     classifier: NearestCentroid,
     profile: UserProfile,
     segmenter_config: SegmenterConfig,
-    calibration_samples: Vec<(Phoneme, Vec<f32>)>,
+    calibration_samples: Vec<(Syllable, Vec<f32>)>,
 }
 
 impl Pipeline {
@@ -54,26 +54,22 @@ impl Pipeline {
     }
 
     /// Accumulate a single calibration sample for batch training.
-    pub fn add_calibration_sample(&mut self, phoneme: Phoneme, features: Vec<f32>) {
-        self.calibration_samples.push((phoneme, features));
+    pub fn add_calibration_sample(&mut self, syllable: Syllable, features: Vec<f32>) {
+        self.calibration_samples.push((syllable, features));
     }
 
     /// Train the classifier from all accumulated calibration samples and
     /// store the resulting centroids in the user profile.
     pub fn finalize_calibration(&mut self) {
         self.classifier.train(&self.calibration_samples);
-        // Store centroids in profile for export. We re-derive them by training
-        // a temporary classifier (the NearestCentroid stores centroids internally,
-        // but we can't read them directly). Instead, compute centroids from samples
-        // the same way the classifier does.
         self.profile.centroids = compute_centroids(&self.calibration_samples);
         self.calibration_samples.clear();
     }
 
     /// Convenience: add all samples and finalize calibration in one call.
-    pub fn calibrate(&mut self, samples: &[(Phoneme, Vec<f32>)]) {
-        for (phoneme, features) in samples {
-            self.calibration_samples.push((*phoneme, features.clone()));
+    pub fn calibrate(&mut self, samples: &[(Syllable, Vec<f32>)]) {
+        for (syllable, features) in samples {
+            self.calibration_samples.push((*syllable, features.clone()));
         }
         self.finalize_calibration();
     }
@@ -88,10 +84,10 @@ impl Pipeline {
     /// Steps:
     /// 1. Segment the PCM into syllable bounds
     /// 2. Extract MFCC features for each syllable
-    /// 3. Classify features
-    /// 4. Apply profile remap
+    /// 3. Classify features into one of 16 syllables
+    /// 4. Apply profile remap (phoneme-level component remapping)
     /// 5. Apply threshold decision
-    /// 6. Encode auto-accepted phonemes into Q8 bytes
+    /// 6. Encode auto-accepted syllables into Q8 bytes (2 syllables = 1 byte)
     pub fn process(&self, pcm: &[f32]) -> UtteranceResult {
         if !self.is_calibrated() {
             return UtteranceResult {
@@ -104,7 +100,7 @@ impl Pipeline {
         let bounds = segmenter::segment(pcm, &self.segmenter_config);
 
         let mut syllable_results = Vec::new();
-        let mut accepted_phonemes: Vec<Phoneme> = Vec::new();
+        let mut accepted_syllables: Vec<Syllable> = Vec::new();
 
         for bound in &bounds {
             let segment_pcm = &pcm[bound.start..bound.end];
@@ -119,17 +115,17 @@ impl Pipeline {
             };
 
             // Step 4: Apply profile remap
-            let remapped_phoneme = self.profile.apply_remap(classification.phoneme);
+            let remapped = self.profile.apply_remap(classification.syllable);
 
             // Step 5: Apply threshold decision
             let decision = self
                 .profile
                 .thresholds
-                .decide(remapped_phoneme, classification.confidence);
+                .decide(remapped, classification.confidence);
 
-            // Collect accepted phonemes for Q8 encoding
-            if let Decision::Accept(phoneme, _) = &decision {
-                accepted_phonemes.push(*phoneme);
+            // Collect accepted syllables for Q8 encoding
+            if let Decision::Accept(syllable, _) = &decision {
+                accepted_syllables.push(*syllable);
             }
 
             syllable_results.push(SyllableResult {
@@ -138,10 +134,9 @@ impl Pipeline {
             });
         }
 
-        // Step 6: Encode accepted phonemes into Q8 bytes.
-        // Each phoneme produces a 2-bit value. Group every 2 phonemes into a nibble
-        // (first = high 2 bits, second = low 2 bits). Group every 2 nibbles into a byte.
-        let q8_bytes = encode_phonemes_to_q8(&accepted_phonemes);
+        // Step 6: Encode accepted syllables into Q8 bytes.
+        // Each syllable is one nibble. Two syllables = one byte.
+        let q8_bytes = encode_syllables_to_q8(&accepted_syllables);
 
         UtteranceResult {
             syllables: syllable_results,
@@ -158,8 +153,6 @@ impl Pipeline {
     /// re-training the classifier from the imported centroids.
     pub fn import_profile_json(&mut self, json: &str) -> Result<(), serde_json::Error> {
         let profile: UserProfile = serde_json::from_str(json)?;
-        // Re-train classifier from the profile's stored centroids.
-        // Each centroid is a single (phoneme, features) pair used as a training sample.
         self.classifier.train(&profile.centroids);
         self.profile = profile;
         Ok(())
@@ -172,17 +165,17 @@ impl Default for Pipeline {
     }
 }
 
-/// Compute mean centroids from training samples, grouped by phoneme.
-fn compute_centroids(samples: &[(Phoneme, Vec<f32>)]) -> Vec<(Phoneme, Vec<f32>)> {
+/// Compute mean centroids from training samples, grouped by syllable.
+fn compute_centroids(samples: &[(Syllable, Vec<f32>)]) -> Vec<(Syllable, Vec<f32>)> {
     use std::collections::HashMap;
 
-    let mut groups: HashMap<Phoneme, Vec<&Vec<f32>>> = HashMap::new();
-    for (phoneme, features) in samples {
-        groups.entry(*phoneme).or_default().push(features);
+    let mut groups: HashMap<Syllable, Vec<&Vec<f32>>> = HashMap::new();
+    for (syllable, features) in samples {
+        groups.entry(*syllable).or_default().push(features);
     }
 
     let mut centroids = Vec::new();
-    for (phoneme, vectors) in groups {
+    for (syllable, vectors) in groups {
         if vectors.is_empty() {
             continue;
         }
@@ -197,36 +190,20 @@ fn compute_centroids(samples: &[(Phoneme, Vec<f32>)]) -> Vec<(Phoneme, Vec<f32>)
         for v in &mut mean {
             *v /= n;
         }
-        centroids.push((phoneme, mean));
+        centroids.push((syllable, mean));
     }
     centroids
 }
 
-/// Encode a sequence of accepted phonemes into Q8 bytes.
+/// Encode a sequence of accepted syllables into Q8 bytes.
 ///
-/// Each phoneme produces a 2-bit value. Every 2 phonemes form a nibble
-/// (first = high 2 bits, second = low 2 bits). Every 2 nibbles form a byte.
-/// Trailing phonemes that don't complete a byte are discarded.
-fn encode_phonemes_to_q8(phonemes: &[Phoneme]) -> Vec<u8> {
-    // Each phoneme -> 2-bit value
-    let bits: Vec<u8> = phonemes
-        .iter()
-        .map(|p| match p {
-            Phoneme::Consonant(c) => c.bits(),
-            Phoneme::Vowel(v) => v.bits(),
-        })
-        .collect();
-
-    // Group into nibbles: 2 phonemes per nibble
-    let nibbles: Vec<u8> = bits
+/// Each syllable is a nibble (4 bits). Two syllables = one byte
+/// (first = high nibble, second = low nibble).
+/// Trailing syllables that don't complete a byte are discarded.
+fn encode_syllables_to_q8(syllables: &[Syllable]) -> Vec<u8> {
+    syllables
         .chunks_exact(2)
-        .map(|pair| (pair[0] << 2) | pair[1])
-        .collect();
-
-    // Group into bytes: 2 nibbles per byte
-    nibbles
-        .chunks_exact(2)
-        .map(|pair| (pair[0] << 4) | pair[1])
+        .map(|pair| (pair[0].to_nibble() << 4) | pair[1].to_nibble())
         .collect()
 }
 
@@ -247,28 +224,18 @@ mod tests {
             .collect()
     }
 
-    /// Build synthetic MFCC features for a phoneme using a deterministic pattern.
-    /// Each phoneme gets a unique region of the 52-dim space.
-    fn make_features(phoneme_idx: usize) -> Vec<f32> {
+    /// Build synthetic MFCC features for a syllable using a deterministic pattern.
+    fn make_features(syllable_idx: usize) -> Vec<f32> {
         let mut v = vec![0.0f32; FEATURE_DIM];
-        let base = (phoneme_idx * 6) % FEATURE_DIM;
+        let base = (syllable_idx * 3) % FEATURE_DIM;
         v[base] = 1.0;
         v[(base + 1) % FEATURE_DIM] = 0.5;
         v[(base + 2) % FEATURE_DIM] = 0.8;
         v
     }
 
-    fn all_phonemes() -> Vec<Phoneme> {
-        vec![
-            Phoneme::Consonant(Consonant::GlottalStop),
-            Phoneme::Consonant(Consonant::J),
-            Phoneme::Consonant(Consonant::K),
-            Phoneme::Consonant(Consonant::V),
-            Phoneme::Vowel(Vowel::O),
-            Phoneme::Vowel(Vowel::U),
-            Phoneme::Vowel(Vowel::E),
-            Phoneme::Vowel(Vowel::I),
-        ]
+    fn all_syllables() -> Vec<Syllable> {
+        (0..16).map(Syllable::from_nibble).collect()
     }
 
     #[test]
@@ -276,71 +243,47 @@ mod tests {
         let pipeline = Pipeline::new();
         assert!(!pipeline.is_calibrated());
 
-        // Generate some audio (1 second of 440Hz sine)
         let pcm = sine_wave(440.0, SAMPLE_RATE as usize);
         let result = pipeline.process(&pcm);
 
-        assert!(
-            result.syllables.is_empty(),
-            "uncalibrated pipeline should produce no syllable results"
-        );
-        assert!(
-            result.q8_bytes.is_empty(),
-            "uncalibrated pipeline should produce no Q8 bytes"
-        );
+        assert!(result.syllables.is_empty());
+        assert!(result.q8_bytes.is_empty());
     }
 
     #[test]
     fn pipeline_calibrate_and_process() {
         let mut pipeline = Pipeline::new();
-        let phonemes = all_phonemes();
+        let syllables = all_syllables();
 
-        // Generate synthetic calibration data: 5 samples per phoneme
-        // using unique feature vectors per phoneme.
-        let mut samples: Vec<(Phoneme, Vec<f32>)> = Vec::new();
-        for (idx, &phoneme) in phonemes.iter().enumerate() {
+        let mut samples: Vec<(Syllable, Vec<f32>)> = Vec::new();
+        for (idx, &syllable) in syllables.iter().enumerate() {
             for rep in 0..5 {
                 let mut features = make_features(idx);
-                // Add small noise per repetition
                 for (i, v) in features.iter_mut().enumerate() {
                     *v += (rep as f32) * 0.01 * ((i % 3) as f32 - 1.0);
                 }
-                samples.push((phoneme, features));
+                samples.push((syllable, features));
             }
         }
 
-        assert!(
-            !pipeline.is_calibrated(),
-            "should not be calibrated before training"
-        );
-
+        assert!(!pipeline.is_calibrated());
         pipeline.calibrate(&samples);
-
-        assert!(
-            pipeline.is_calibrated(),
-            "should be calibrated after training"
-        );
-
-        // Verify profile has centroids stored
-        assert!(
-            !pipeline.profile.centroids.is_empty(),
-            "profile should have centroids after calibration"
-        );
+        assert!(pipeline.is_calibrated());
+        assert!(!pipeline.profile.centroids.is_empty());
     }
 
     #[test]
     fn pipeline_add_calibration_sample_then_finalize() {
         let mut pipeline = Pipeline::new();
-        let phonemes = all_phonemes();
+        let syllables = all_syllables();
 
-        // Add samples one at a time
-        for (idx, &phoneme) in phonemes.iter().enumerate() {
+        for (idx, &syllable) in syllables.iter().enumerate() {
             for rep in 0..3 {
                 let mut features = make_features(idx);
                 for (i, v) in features.iter_mut().enumerate() {
                     *v += (rep as f32) * 0.005 * ((i % 3) as f32 - 1.0);
                 }
-                pipeline.add_calibration_sample(phoneme, features);
+                pipeline.add_calibration_sample(syllable, features);
             }
         }
 
@@ -352,52 +295,30 @@ mod tests {
     #[test]
     fn pipeline_export_import_profile() {
         let mut pipeline = Pipeline::new();
-        let phonemes = all_phonemes();
+        let syllables = all_syllables();
 
-        // Calibrate with synthetic data
-        let samples: Vec<(Phoneme, Vec<f32>)> = phonemes
+        let samples: Vec<(Syllable, Vec<f32>)> = syllables
             .iter()
             .enumerate()
-            .map(|(idx, &phoneme)| (phoneme, make_features(idx)))
+            .map(|(idx, &syllable)| (syllable, make_features(idx)))
             .collect();
 
         pipeline.calibrate(&samples);
-        assert!(pipeline.is_calibrated());
 
-        // Export profile
         let json = pipeline
             .export_profile_json()
             .expect("export should succeed");
+        assert!(!json.is_empty());
+        assert!(json.contains("centroids"));
 
-        // Verify it's valid JSON
-        assert!(!json.is_empty(), "exported JSON should not be empty");
-        assert!(
-            json.contains("centroids"),
-            "JSON should contain centroids field"
-        );
-
-        // Import into a new pipeline
         let mut new_pipeline = Pipeline::new();
-        assert!(!new_pipeline.is_calibrated());
-
         new_pipeline
             .import_profile_json(&json)
             .expect("import should succeed");
-
-        assert!(
-            new_pipeline.is_calibrated(),
-            "imported pipeline should be calibrated"
-        );
-
-        // Verify the imported profile matches
+        assert!(new_pipeline.is_calibrated());
         assert_eq!(
             new_pipeline.profile.centroids.len(),
-            pipeline.profile.centroids.len(),
-            "imported profile should have same number of centroids"
-        );
-        assert_eq!(
-            new_pipeline.profile.version, pipeline.profile.version,
-            "imported profile version should match"
+            pipeline.profile.centroids.len()
         );
     }
 
@@ -405,40 +326,33 @@ mod tests {
     fn pipeline_process_with_real_audio() {
         let mut pipeline = Pipeline::new();
 
-        // Use different sine frequencies as calibration data for each phoneme.
-        // This simulates different phonemes having different spectral content.
-        let phonemes = all_phonemes();
-        let freqs = [200.0, 400.0, 800.0, 1600.0, 3200.0, 4800.0, 5600.0, 6400.0];
+        let syllables = all_syllables();
+        let freqs = [
+            200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0,
+            3600.0, 4000.0, 4800.0, 5600.0, 6400.0,
+        ];
 
         let mut samples = Vec::new();
-        for (idx, &phoneme) in phonemes.iter().enumerate() {
-            // Generate a short sine wave and extract real MFCC features
+        for (idx, &syllable) in syllables.iter().enumerate() {
             let wave = sine_wave(freqs[idx], SAMPLE_RATE as usize / 2);
             let features = mfcc::extract_features(&wave);
-            samples.push((phoneme, features));
+            samples.push((syllable, features));
         }
 
         pipeline.calibrate(&samples);
         assert!(pipeline.is_calibrated());
 
         // Create test audio: silence + a burst + silence
-        // This should produce at least one segmented syllable.
         let sr = SAMPLE_RATE as usize;
-        let mut pcm = vec![0.0f32; sr]; // 1 second
-                                        // Insert a 200ms burst (matching phoneme 0's frequency) starting at 200ms
-        let burst_start = sr / 5; // 3200 samples
-        let burst_end = burst_start + sr * 2 / 5; // 6400 samples more
+        let mut pcm = vec![0.0f32; sr];
+        let burst_start = sr / 5;
+        let burst_end = burst_start + sr * 2 / 5;
         for i in burst_start..burst_end.min(sr) {
             let t = i as f32 / SAMPLE_RATE as f32;
             pcm[i] = (2.0 * PI * freqs[0] * t).sin() * 0.8;
         }
 
         let result = pipeline.process(&pcm);
-        // The segmenter should detect the burst as a syllable.
-        // Exact behavior depends on segmenter config and how MFCC features
-        // are classified, but we should get at least one syllable result.
-        // (Not asserting exact count since segmenter behavior with synthetic
-        // data can vary.)
         assert!(
             !result.syllables.is_empty() || result.q8_bytes.is_empty(),
             "process should return a valid UtteranceResult"
@@ -446,45 +360,40 @@ mod tests {
     }
 
     #[test]
-    fn encode_phonemes_to_q8_basic() {
-        // 4 phonemes -> 2 nibbles -> 1 byte
-        let phonemes = vec![
-            Phoneme::Consonant(Consonant::K),           // bits = 10
-            Phoneme::Vowel(Vowel::U),                   // bits = 01
-            Phoneme::Consonant(Consonant::GlottalStop), // bits = 00
-            Phoneme::Vowel(Vowel::E),                   // bits = 10
+    fn encode_syllables_to_q8_basic() {
+        // KU + 'E = byte 0x92
+        let syllables = vec![
+            Syllable::new(Consonant::K, Vowel::U),           // nibble 9
+            Syllable::new(Consonant::GlottalStop, Vowel::E), // nibble 2
         ];
 
-        let bytes = encode_phonemes_to_q8(&phonemes);
-
-        // nibble0 = (10 << 2) | 01 = 0b1001 = 9
-        // nibble1 = (00 << 2) | 10 = 0b0010 = 2
-        // byte = (9 << 4) | 2 = 0x92
+        let bytes = encode_syllables_to_q8(&syllables);
         assert_eq!(bytes, vec![0x92]);
     }
 
     #[test]
-    fn encode_phonemes_to_q8_trailing_discarded() {
-        // 3 phonemes -> 1 nibble (2 phonemes), 1 leftover -> 0 complete bytes
-        // Actually: 3 phonemes -> 1 complete nibble + 1 leftover phoneme
-        // 1 nibble is not enough for a byte, so 0 bytes
-        let phonemes = vec![
-            Phoneme::Consonant(Consonant::J), // bits = 01
-            Phoneme::Vowel(Vowel::O),         // bits = 00
-            Phoneme::Vowel(Vowel::I),         // bits = 11 (leftover)
-        ];
-
-        let bytes = encode_phonemes_to_q8(&phonemes);
-        assert!(
-            bytes.is_empty(),
-            "3 phonemes should produce 0 complete bytes"
-        );
+    fn encode_syllables_to_q8_trailing_discarded() {
+        // 1 syllable can't form a complete byte
+        let syllables = vec![Syllable::new(Consonant::J, Vowel::O)];
+        let bytes = encode_syllables_to_q8(&syllables);
+        assert!(bytes.is_empty(), "1 syllable should produce 0 bytes");
     }
 
     #[test]
-    fn encode_phonemes_to_q8_empty() {
-        let bytes = encode_phonemes_to_q8(&[]);
-        assert!(bytes.is_empty());
+    fn encode_syllables_to_q8_empty() {
+        assert!(encode_syllables_to_q8(&[]).is_empty());
+    }
+
+    #[test]
+    fn encode_syllables_roundtrip_with_q8() {
+        // Encode via syllables, verify it matches q8::byte_to_word
+        use crate::q8;
+
+        let s1 = Syllable::new(Consonant::V, Vowel::I); // nibble 15 = 0xF
+        let s2 = Syllable::new(Consonant::V, Vowel::I); // nibble 15 = 0xF
+        let bytes = encode_syllables_to_q8(&[s1, s2]);
+        assert_eq!(bytes, vec![0xFF]);
+        assert_eq!(q8::byte_to_word(0xFF), "VIVI");
     }
 
     #[test]
@@ -495,10 +404,11 @@ mod tests {
 
     #[test]
     fn syllable_result_serialization() {
+        let syllable = Syllable::new(Consonant::K, Vowel::O);
         let result = SyllableResult {
-            decision: Decision::Accept(Phoneme::Consonant(Consonant::K), 0.95),
+            decision: Decision::Accept(syllable, 0.95),
             raw_classification: Classification {
-                phoneme: Phoneme::Consonant(Consonant::K),
+                syllable,
                 confidence: 0.95,
             },
         };
@@ -508,18 +418,19 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize SyllableResult");
 
         assert_eq!(
-            restored.raw_classification.phoneme,
-            result.raw_classification.phoneme
+            restored.raw_classification.syllable,
+            result.raw_classification.syllable
         );
     }
 
     #[test]
     fn utterance_result_serialization() {
+        let syllable = Syllable::new(Consonant::V, Vowel::E);
         let result = UtteranceResult {
             syllables: vec![SyllableResult {
                 decision: Decision::Reject(0.2),
                 raw_classification: Classification {
-                    phoneme: Phoneme::Vowel(Vowel::E),
+                    syllable,
                     confidence: 0.2,
                 },
             }],

@@ -28,6 +28,9 @@ mod hex_btree {
         let string_map: BTreeMap<String, Scroll> = BTreeMap::deserialize(deserializer)?;
         let mut result = BTreeMap::new();
         for (hex_key, value) in string_map {
+            if hex_key.len() % 2 != 0 {
+                return Err(D::Error::custom("odd-length hex key"));
+            }
             let bytes: Result<Vec<u8>, _> = (0..hex_key.len())
                 .step_by(2)
                 .map(|i| {

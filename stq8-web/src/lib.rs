@@ -1,7 +1,7 @@
-use wasm_bindgen::prelude::*;
-use stq8_core::pipeline::Pipeline;
-use stq8_core::q8::{self, Phoneme, Consonant, Vowel};
 use stq8_core::mfcc;
+use stq8_core::pipeline::Pipeline;
+use stq8_core::q8::{self, Syllable};
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct WasmPipeline {
@@ -18,16 +18,18 @@ impl Default for WasmPipeline {
 impl WasmPipeline {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        Self { inner: Pipeline::new() }
+        Self {
+            inner: Pipeline::new(),
+        }
     }
 
-    /// Feed a calibration sample. phoneme_index: 0-7
-    /// (0=GlottalStop, 1=J, 2=K, 3=V, 4=O, 5=U, 6=E, 7=I).
+    /// Feed a calibration sample. syllable_index: 0-15
+    /// (maps to Q8 syllables: 0='O, 1='U, ..., 15=VI).
     /// pcm: raw f32 samples at 16kHz.
-    pub fn add_calibration_sample(&mut self, phoneme_index: u8, pcm: &[f32]) {
-        let phoneme = index_to_phoneme(phoneme_index);
+    pub fn add_calibration_sample(&mut self, syllable_index: u8, pcm: &[f32]) {
+        let syllable = Syllable::from_nibble(syllable_index.min(15));
         let features = mfcc::extract_features(pcm);
-        self.inner.add_calibration_sample(phoneme, features);
+        self.inner.add_calibration_sample(syllable, features);
     }
 
     pub fn finalize_calibration(&mut self) {
@@ -60,19 +62,5 @@ impl WasmPipeline {
 
     pub fn import_profile(&mut self, json: &str) -> bool {
         self.inner.import_profile_json(json).is_ok()
-    }
-}
-
-fn index_to_phoneme(idx: u8) -> Phoneme {
-    match idx {
-        0 => Phoneme::Consonant(Consonant::GlottalStop),
-        1 => Phoneme::Consonant(Consonant::J),
-        2 => Phoneme::Consonant(Consonant::K),
-        3 => Phoneme::Consonant(Consonant::V),
-        4 => Phoneme::Vowel(Vowel::O),
-        5 => Phoneme::Vowel(Vowel::U),
-        6 => Phoneme::Vowel(Vowel::E),
-        7 => Phoneme::Vowel(Vowel::I),
-        _ => Phoneme::Vowel(Vowel::O), // fallback
     }
 }
