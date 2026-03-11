@@ -42,12 +42,12 @@ impl Thresholds {
     /// Decide what to do with a classification result based on confidence.
     ///
     /// - confidence >= auto_accept -> Accept
-    /// - confidence >= suggest -> Suggest
-    /// - otherwise -> Reject
+    /// - confidence >= reject -> Suggest (show "did you mean?")
+    /// - confidence < reject -> Reject (too ambiguous, no suggestion)
     pub fn decide(&self, phoneme: Phoneme, confidence: f32) -> Decision {
         if confidence >= self.auto_accept {
             Decision::Accept(phoneme, confidence)
-        } else if confidence >= self.suggest {
+        } else if confidence >= self.reject {
             Decision::Suggest(phoneme, confidence)
         } else {
             Decision::Reject(confidence)
